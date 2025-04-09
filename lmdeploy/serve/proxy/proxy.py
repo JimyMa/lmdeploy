@@ -487,28 +487,48 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
     check_response = await node_manager.check_request_model(request.model)
     if check_response is not None:
         return check_response
-    
-    # TODO: Router Prefill
-    prefill_node_url = node_manager.get_prefill_node_url(request.model)
-    if not node_url:
-        return node_manager.handle_unavailable_model(request.model)
 
-    logger.info(f'A request is dispatched to {node_url}')
     request_dict = request.model_dump()
-    start = node_manager.pre_call(node_url)
 
+    # Prefill
+    prefill_request_dict = deepcopy(request_dict)
+    prefill_request_dict["max_tokens"] = 1
+    prefill_request_dict["stream"] = False
+
+    prefill_node_url = node_manager.get_node_url(EngineRole.Prefill, request.model)
+    if not prefill_node_url:
+        return node_manager.handle_unavailable_model(request.model)
+    logger.info(f'A Prefill request is dispatched to {node_url}')
+
+    start = node_manager.pre_call(prefill_node_url, EngineRole.Prefill)
+    response = await node_manager.generate(request_dict, prefill_node_url, '/v1/chat/completions')
+    node_manager.post_call(prefill_node_url, EngineRole.Prefill, start)
+
+    # TODO: Handle Cache BlockIds
+    prefill_info = response.json()
+
+    # Decode
+    # TODO: Add Migration request
+    migration_request = MigrationRequest(
+        remote_engine_id=0,
+        remote_session_id=0,
+        remote_block_ids=prefill_info["cache_block_ids"],
+        remote_token_id=prefill_info["remote_token_ids"][-1],
+    )
+    decode_node_url = node_manager.get_node_url(EngineRole.Decode, request.model)
+    if not decode_node_url:
+        return node_manager.handle_unavailable_model(request.model)
+    logger.info(f'A Decode request is dispatched to {node_url}')
+
+    start = node_manager.pre_call(decode_node_url, EngineRole.Decode)
     if request.stream is True:
-        response = node_manager.stream_generate(request_dict, node_url, '/v1/chat/completions')
+        response = node_manager.stream_generate(request_dict, decode_node_url, '/v1/chat/completions')
         background_task = node_manager.create_background_tasks(node_url, start)
         return StreamingResponse(response, background=background_task)
     else:
-        response = await node_manager.generate(request_dict, node_url, '/v1/chat/completions')
+        response = await node_manager.generate(request_dict, decode_node_url, '/v1/chat/completions')
         node_manager.post_call(node_url, start)
         return JSONResponse(json.loads(response))
-    
-    # TODO: Router Decode
-
-
 
 @app.post('/v1/completions', dependencies=[Depends(check_api_key)])
 async def completions_v1(request: CompletionRequest, raw_request: Request = None):
@@ -550,19 +570,46 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
     check_response = await node_manager.check_request_model(request.model)
     if check_response is not None:
         return check_response
-    node_url = node_manager.get_node_url(request.model)
-    if not node_url:
-        return node_manager.handle_unavailable_model(request.model)
 
-    logger.info(f'A request is dispatched to {node_url}')
     request_dict = request.model_dump()
-    start = node_manager.pre_call(node_url)
+
+    # Prefill
+    prefill_request_dict = deepcopy(request_dict)
+    prefill_request_dict["max_tokens"] = 1
+    prefill_request_dict["stream"] = False
+
+    prefill_node_url = node_manager.get_node_url(EngineRole.Prefill, request.model)
+    if not prefill_node_url:
+        return node_manager.handle_unavailable_model(request.model)
+    logger.info(f'A Prefill request is dispatched to {node_url}')
+
+    start = node_manager.pre_call(prefill_node_url, EngineRole.Prefill)
+    response = await node_manager.generate(request_dict, prefill_node_url, '/v1/completions')
+    node_manager.post_call(prefill_node_url, EngineRole.Prefill, start)
+
+    # TODO: Handle Cache BlockIds
+    prefill_info = response.json()
+
+    # Decode
+    # TODO: Add Migration request
+    migration_request = MigrationRequest(
+        remote_engine_id=0,
+        remote_session_id=0,
+        remote_block_ids=prefill_info["cache_block_ids"],
+        remote_token_id=prefill_info["remote_token_ids"][-1],
+    )
+    decode_node_url = node_manager.get_node_url(EngineRole.Decode, request.model)
+    if not decode_node_url:
+        return node_manager.handle_unavailable_model(request.model)
+    logger.info(f'A Decode request is dispatched to {node_url}')
+
+    start = node_manager.pre_call(decode_node_url, EngineRole.Decode)
     if request.stream is True:
-        response = node_manager.stream_generate(request_dict, node_url, '/v1/completions')
+        response = node_manager.stream_generate(request_dict, decode_node_url, '/v1/completions')
         background_task = node_manager.create_background_tasks(node_url, start)
         return StreamingResponse(response, background=background_task)
     else:
-        response = await node_manager.generate(request_dict, node_url, '/v1/completions')
+        response = await node_manager.generate(request_dict, decode_node_url, '/v1/completions')
         node_manager.post_call(node_url, start)
         return JSONResponse(json.loads(response))
 
