@@ -22,6 +22,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from lmdeploy.disagg.messages import EngineRole, MigrationTransportProtocol
+from lmdeploy.disagg.conn import pd_consolidation
 from lmdeploy.serve.openai.api_server import check_api_key, create_error_response
 from lmdeploy.serve.openai.protocol import ModelCard  # noqa: E501
 from lmdeploy.serve.openai.protocol import ChatCompletionRequest, CompletionRequest, ModelList, ModelPermission
@@ -37,6 +39,7 @@ class Status(BaseModel):
     unfinished: int = 0
     latency: Deque = Field(default=deque(maxlen=LATENCY_DEQUE_LEN), examples=[[]])
     speed: Optional[int] = Field(default=None, examples=[None])
+    role: EngineRole = EngineRole.Hybrid
 
 
 class Node(BaseModel):
@@ -74,7 +77,9 @@ class NodeManager:
                  config_path: Optional[str] = None,
                  strategy: str = 'min_expected_latency',
                  cache_status: Optional[bool] = True) -> None:
-        self.nodes = dict()
+        self.hybrid_nodes = dict()
+        self.prefill_nodes = dict()
+        self.decode_nodes = dict()
         self.strategy = Strategy.from_str(strategy)
         self.cache_status = cache_status
         self.latencies = dict()
@@ -83,19 +88,27 @@ class NodeManager:
             self.config_path = config_path
         if osp.exists(self.config_path) and self.cache_status:
             with open(self.config_path, 'r') as config_file:
-                self.nodes = yaml.safe_load(config_file)['nodes']
-                for url, status in self.nodes.items():
+                self.hybrid_nodes = yaml.safe_load(config_file)['nodes']
+                for url, status in self.hybrid_nodes.items():
                     latency = deque(status.get('latency', []), maxlen=LATENCY_DEQUE_LEN)
                     status['latency'] = latency
                     status = Status(**status)
-                    self.nodes[url] = status
+                    self.hybrid_nodes[url] = status
         self.heart_beat_thread = threading.Thread(target=heart_beat_controller, args=(self, ), daemon=True)
         self.heart_beat_thread.start()
         self.aiotimeout = aiohttp.ClientTimeout(total=API_READ_TIMEOUT)
+    
+    def nodes(self, role: EngineRole) -> Dict:
+        match role:
+            case Engine.Hybrid:
+                return self.hybrid_nodes
+            case Engine.Prefill:
+                return self.prefill_nodes
+            case Engine.Decode:
+                return self.decode_nodes
 
-    def update_config_file(self):
+    def update_config_file(self, role: EngineRole):
         """Update the config file."""
-        nodes = copy.deepcopy(self.nodes)
         for url, status in nodes.items():
             nodes[url] = status.model_dump()
             nodes[url]['latency'] = list(status.latency)[-LATENCY_DEQUE_LEN:]
@@ -115,30 +128,54 @@ class NodeManager:
                 values of nodes should be the same metric.
         """
         if status is None:
-            status = self.nodes.get(node_url, Status())
+            status = self.nodes(EngineRole.Hybrid).get(node_url, Status())
+        if status is None:
+            return self.handle_api_timeout(node_url)
+
+        role = status.role
         if status.models != []:  # force register directly
-            self.nodes[node_url] = status
-            self.update_config_file()
+            self.nodes(role)[node_url] = status
+            if role == EngineRole.Prefill:
+                for d_url, d_status in self.decode_nodes.items():
+                    pd_consolidation(
+                        [node_url, d_url],
+                        protocol=MigrationTransportProtocol.RDMA
+                    )
+            elif role == EngineRole.Decode:
+                for p_url, p_status in self.decode_node.items():
+                    pd_consolidation(
+                        [p_url, node_url],
+                        protocol=MigrationTransportProtocol.RDMA
+                    )
+            self.update_config_file(role=role)
             return
         try:
             from lmdeploy.serve.openai.api_client import APIClient
             client = APIClient(api_server_url=node_url)
             status.models = client.available_models
-            self.nodes[node_url] = status
+            self.nodes(role)[node_url] = status
         except requests.exceptions.RequestException as e:  # noqa
             return self.handle_api_timeout(node_url)
-        self.update_config_file()
+        self.update_config_file(role=role)
 
     def remove(self, node_url: str):
         """Remove a node."""
-        if node_url in self.nodes.keys():
-            self.nodes.pop(node_url)
-            self.update_config_file()
+        if node_url in self.hybrid_nodes.keys():
+            self.nodes(EngineRole.Hybrid).pop(node_url)
+            self.update_config_file(EngineRole.Hybrid)
+
+        if node_url in self.prefill_nodes.keys():
+            self.nodes(EngineRole.Prefill).pop(node_url)
+            self.update_config_file(EngineRole.Prefill)
+
+        if node_url in self.decode_nodes.keys():
+            self.nodes(EngineRole.Decode).pop(node_url)
+            self.update_config_file(EngineRole.Decode)
 
     def remove_stale_nodes_by_expiration(self):
         """remove stale nodes."""
         to_be_deleted = []
-        for node_url in self.nodes.keys():
+        for node_url in self.status:
             url = f'{node_url}/health'
             headers = {'accept': 'application/json'}
             try:
@@ -156,16 +193,16 @@ class NodeManager:
     def model_list(self):
         """Supported model list."""
         model_names = []
-        for node_url, node_status in self.nodes.items():
+        for node_url, node_status in self.status.items():
             model_names.extend(node_status.models)
         return model_names
 
     @property
     def status(self):
         """Return the status."""
-        return self.nodes
+        return self.hybrid_nodes + self.prefill_nodes + self.decode_nodes
 
-    def get_node_url(self, model_name: str):
+    def get_node_url(self, role: EngineRole, model_name: str):
         """Add a node to the manager.
 
         Args:
@@ -177,7 +214,7 @@ class NodeManager:
 
         def get_matched_urls():
             urls_with_speeds, speeds, urls_without_speeds = [], [], []
-            for node_url, node_status in self.nodes.items():
+            for node_url, node_status in self.nodes(role).items():
                 if model_name in node_status.models:
                     if node_status.speed is not None:
                         urls_with_speeds.append(node_url)
@@ -212,7 +249,7 @@ class NodeManager:
             all_indexes = [i for i in range(len(all_the_speeds))]
             random.shuffle(all_indexes)
             for index in all_indexes:
-                latency = self.nodes[all_matched_urls[index]].unfinished / all_the_speeds[index]
+                latency = self.nodes(role)[all_matched_urls[index]].unfinished / all_the_speeds[index]
                 if min_latency > latency:
                     min_latency = latency
                     min_index = index
@@ -220,7 +257,7 @@ class NodeManager:
             return url
         elif self.strategy == Strategy.MIN_OBSERVED_LATENCY:
             all_matched_urls, latencies = [], []
-            for node_url, node_status in self.nodes.items():
+            for node_url, node_status in self.nodes(role).items():
                 if model_name in node_status.models:
                     if len(node_status.latency):
                         latencies.append(np.mean(np.array(node_status.latency)))
@@ -298,26 +335,26 @@ class NodeManager:
             logger.error(f'catched an exception: {e}')
             return self.handle_api_timeout(node_url)
 
-    def pre_call(self, node_url):
+    def pre_call(self, node_url, role: EngineRole):
         """Preprocess before the request get processed.
 
         Args:
             node_url (str): the node url.
         """
-        self.nodes[node_url].unfinished += 1
+        self.nodes(role)[node_url].unfinished += 1
         return time.time()
 
-    def post_call(self, node_url: str, start: int):
+    def post_call(self, node_url: str, role: EngineRole, start: int):
         """Post process after the response finished.
 
         Args:
             node_url (str): the node url.
             start (int): the start time point. time.time()
         """
-        self.nodes[node_url].unfinished -= 1
-        self.nodes[node_url].latency.append(time.time() - start)
+        self.nodes(role)[node_url].unfinished -= 1
+        self.nodes(role)[node_url].latency.append(time.time() - start)
 
-    def create_background_tasks(self, url: str, start: int):
+    def create_background_tasks(self, url: str, role: EngineRole, start: int):
         """To create a background task.
 
         Args:
@@ -325,7 +362,7 @@ class NodeManager:
             start (int): the start time point. time.time()
         """
         background_tasks = BackgroundTasks()
-        background_tasks.add_task(self.post_call, url, start)
+        background_tasks.add_task(self.post_call, url, role, start)
         return background_tasks
 
 
@@ -450,13 +487,16 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
     check_response = await node_manager.check_request_model(request.model)
     if check_response is not None:
         return check_response
-    node_url = node_manager.get_node_url(request.model)
+    
+    # TODO: Router Prefill
+    prefill_node_url = node_manager.get_prefill_node_url(request.model)
     if not node_url:
         return node_manager.handle_unavailable_model(request.model)
 
     logger.info(f'A request is dispatched to {node_url}')
     request_dict = request.model_dump()
     start = node_manager.pre_call(node_url)
+
     if request.stream is True:
         response = node_manager.stream_generate(request_dict, node_url, '/v1/chat/completions')
         background_task = node_manager.create_background_tasks(node_url, start)
@@ -465,6 +505,9 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
         response = await node_manager.generate(request_dict, node_url, '/v1/chat/completions')
         node_manager.post_call(node_url, start)
         return JSONResponse(json.loads(response))
+    
+    # TODO: Router Decode
+
 
 
 @app.post('/v1/completions', dependencies=[Depends(check_api_key)])

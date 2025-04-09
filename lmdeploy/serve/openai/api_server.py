@@ -1002,8 +1002,15 @@ async def startup_event():
         return
     try:
         import requests
+        engine = VariableInterface.async_engine.engine
         url = f'{VariableInterface.proxy_url}/nodes/add'
-        data = {'url': VariableInterface.api_server_url, 'status': {'models': get_model_list()}}
+        data = {
+            'url': VariableInterface.api_server_url,
+            'status': {
+                'models': get_model_list(),
+                'role': engine.engine_config.role.name
+            },
+        }
         headers = {'accept': 'application/json', 'Content-Type': 'application/json'}
         response = requests.post(url, headers=headers, json=data)
 
