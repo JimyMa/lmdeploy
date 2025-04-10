@@ -55,7 +55,7 @@ async def generate(request: Request):
                 VariableInterface.session_id += 1
                 prefill_data["session_id"] = VariableInterface.session_id
             prefill_data["max_tokens"] = 1
-            prefill_data["stream"] = True
+            prefill_data["stream"] = False
             prefill_data["with_cache"] = True
             prefill_url = get_url(
                 engine_snapshot.prefill_endpoints[0], "v1/completions"

@@ -1000,25 +1000,25 @@ def handle_torchrun():
 async def startup_event():
     if VariableInterface.proxy_url is None:
         return
-    try:
-        import requests
-        engine = VariableInterface.async_engine.engine
-        url = f'{VariableInterface.proxy_url}/nodes/add'
-        data = {
-            'url': VariableInterface.api_server_url,
-            'status': {
-                'models': get_model_list(),
-                'role': engine.engine_config.role.name
-            },
-        }
-        headers = {'accept': 'application/json', 'Content-Type': 'application/json'}
-        response = requests.post(url, headers=headers, json=data)
+    # try:
+    import requests
+    engine = VariableInterface.async_engine.engine
+    url = f'{VariableInterface.proxy_url}/nodes/add'
+    data = {
+        'url': VariableInterface.api_server_url,
+        'status': {
+            'models': get_model_list(),
+            'role': engine.engine_config.role.value
+        },
+    }
+    headers = {'accept': 'application/json', 'Content-Type': 'application/json'}
+    response = requests.post(url, headers=headers, json=data)
 
-        if response.status_code != 200:
-            raise HTTPException(status_code=400, detail='Service registration failed')
-        print(response.text)
-    except Exception as e:
-        print(f'Service registration failed: {e}')
+    if response.status_code != 200:
+        raise HTTPException(status_code=400, detail='Service registration failed')
+    print(response.text)
+    # except Exception as e:
+    #     print(f'Service registration failed: {e}')
 
 
 class ConcurrencyLimitMiddleware(BaseHTTPMiddleware):

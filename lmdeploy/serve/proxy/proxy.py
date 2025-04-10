@@ -13,6 +13,7 @@ from http import HTTPStatus
 from typing import Deque, Dict, List, Literal, Optional, Union
 
 import aiohttp
+import httpx
 import numpy as np
 import requests
 import uvicorn
@@ -100,21 +101,21 @@ class NodeManager:
     
     def nodes(self, role: EngineRole) -> Dict:
         match role:
-            case Engine.Hybrid:
+            case EngineRole.Hybrid:
                 return self.hybrid_nodes
-            case Engine.Prefill:
+            case EngineRole.Prefill:
                 return self.prefill_nodes
-            case Engine.Decode:
+            case EngineRole.Decode:
                 return self.decode_nodes
 
     def update_config_file(self, role: EngineRole):
         """Update the config file."""
-        for url, status in nodes.items():
-            nodes[url] = status.model_dump()
-            nodes[url]['latency'] = list(status.latency)[-LATENCY_DEQUE_LEN:]
+        for url, status in self.nodes(role).items():
+            self.nodes(role)[url] = status.model_dump()
+            self.nodes(role)[url]['latency'] = list(status.latency)[-LATENCY_DEQUE_LEN:]
         if self.cache_status:
             with open(self.config_path, 'w') as config_file:  # update cfg yml
-                yaml.dump(dict(nodes=nodes), config_file)
+                yaml.dump(dict(nodes=self.nodes(role)), config_file)
 
     def add(self, node_url: str, status: Optional[Status] = None):
         """Add a node to the manager.
@@ -136,13 +137,13 @@ class NodeManager:
         if status.models != []:  # force register directly
             self.nodes(role)[node_url] = status
             if role == EngineRole.Prefill:
-                for d_url, d_status in self.decode_nodes.items():
+                for d_url, _ in self.decode_nodes.items():
                     pd_consolidation(
                         [node_url, d_url],
                         protocol=MigrationTransportProtocol.RDMA
                     )
             elif role == EngineRole.Decode:
-                for p_url, p_status in self.decode_node.items():
+                for p_url, _ in self.decode_nodes.items():
                     pd_consolidation(
                         [p_url, node_url],
                         protocol=MigrationTransportProtocol.RDMA
@@ -160,15 +161,15 @@ class NodeManager:
 
     def remove(self, node_url: str):
         """Remove a node."""
-        if node_url in self.hybrid_nodes.keys():
+        if node_url in self.hybrid_nodes:
             self.nodes(EngineRole.Hybrid).pop(node_url)
             self.update_config_file(EngineRole.Hybrid)
 
-        if node_url in self.prefill_nodes.keys():
+        if node_url in self.prefill_nodes:
             self.nodes(EngineRole.Prefill).pop(node_url)
             self.update_config_file(EngineRole.Prefill)
 
-        if node_url in self.decode_nodes.keys():
+        if node_url in self.decode_nodes:
             self.nodes(EngineRole.Decode).pop(node_url)
             self.update_config_file(EngineRole.Decode)
 
@@ -200,7 +201,7 @@ class NodeManager:
     @property
     def status(self):
         """Return the status."""
-        return self.hybrid_nodes + self.prefill_nodes + self.decode_nodes
+        return list(self.hybrid_nodes.items()) + list(self.prefill_nodes.items()) + list(self.decode_nodes.items())
 
     def get_node_url(self, role: EngineRole, model_name: str):
         """Add a node to the manager.
@@ -405,15 +406,15 @@ def add_node(node: Node, raw_request: Request = None):
         {models: ['internlm-chat-7b],  speed: 1}. The speed here can be
         RPM or other metric. All the values of nodes should be the same metric.
     """
-    try:
-        res = node_manager.add(node.url, node.status)
-        if res is not None:
-            logger.error(f'add node {node.url} failed, {res}')
-            return res
-        logger.info(f'add node {node.url} successfully')
-        return 'Added successfully'
-    except:  # noqa
-        return 'Failed to add, please check the input url.'
+    # try:
+    res = node_manager.add(node.url, node.status)
+    if res is not None:
+        logger.error(f'add node {node.url} failed, {res}')
+        return res
+    logger.info(f'add node {node.url} successfully')
+    return 'Added successfully'
+    # except:  # noqa
+    #     return 'Failed to add, please check the input url.'
 
 
 @app.post('/nodes/remove', dependencies=[Depends(check_api_key)])
@@ -491,21 +492,20 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
     request_dict = request.model_dump()
 
     # Prefill
-    prefill_request_dict = deepcopy(request_dict)
+    prefill_request_dict = copy.deepcopy(request_dict)
     prefill_request_dict["max_tokens"] = 1
     prefill_request_dict["stream"] = False
+    prefill_request_dict["with_cache"] = True
 
     prefill_node_url = node_manager.get_node_url(EngineRole.Prefill, request.model)
     if not prefill_node_url:
         return node_manager.handle_unavailable_model(request.model)
-    logger.info(f'A Prefill request is dispatched to {node_url}')
+    logger.info(f'A Prefill request is dispatched to {prefill_node_url}')
 
     start = node_manager.pre_call(prefill_node_url, EngineRole.Prefill)
-    response = await node_manager.generate(request_dict, prefill_node_url, '/v1/chat/completions')
+    response = node_manager.stream_generate(request_dict, prefill_node_url, '/v1/chat/completions').__anext__()
     node_manager.post_call(prefill_node_url, EngineRole.Prefill, start)
-
-    # TODO: Handle Cache BlockIds
-    prefill_info = response.json()
+    print(response)
 
     # Decode
     # TODO: Add Migration request
@@ -574,44 +574,43 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
     request_dict = request.model_dump()
 
     # Prefill
-    prefill_request_dict = deepcopy(request_dict)
+    prefill_request_dict = copy.deepcopy(request_dict)
     prefill_request_dict["max_tokens"] = 1
     prefill_request_dict["stream"] = False
+    prefill_request_dict["with_cache"] = True
 
     prefill_node_url = node_manager.get_node_url(EngineRole.Prefill, request.model)
     if not prefill_node_url:
         return node_manager.handle_unavailable_model(request.model)
-    logger.info(f'A Prefill request is dispatched to {node_url}')
+    logger.info(f'A Prefill request is dispatched to {prefill_node_url}')
 
     start = node_manager.pre_call(prefill_node_url, EngineRole.Prefill)
-    response = await node_manager.generate(request_dict, prefill_node_url, '/v1/completions')
+    response = node_manager.stream_generate(request_dict, prefill_node_url, '/v1/chat/completions').__anext__()
     node_manager.post_call(prefill_node_url, EngineRole.Prefill, start)
+    print(response)
 
-    # TODO: Handle Cache BlockIds
-    prefill_info = response.json()
+    # # Decode
+    # # TODO: Add Migration request
+    # migration_request = MigrationRequest(
+    #     remote_engine_id=0,
+    #     remote_session_id=0,
+    #     remote_block_ids=prefill_info["cache_block_ids"],
+    #     remote_token_id=prefill_info["remote_token_ids"][-1],
+    # )
+    # decode_node_url = node_manager.get_node_url(EngineRole.Decode, request.model)
+    # if not decode_node_url:
+    #     return node_manager.handle_unavailable_model(request.model)
+    # logger.info(f'A Decode request is dispatched to {node_url}')
 
-    # Decode
-    # TODO: Add Migration request
-    migration_request = MigrationRequest(
-        remote_engine_id=0,
-        remote_session_id=0,
-        remote_block_ids=prefill_info["cache_block_ids"],
-        remote_token_id=prefill_info["remote_token_ids"][-1],
-    )
-    decode_node_url = node_manager.get_node_url(EngineRole.Decode, request.model)
-    if not decode_node_url:
-        return node_manager.handle_unavailable_model(request.model)
-    logger.info(f'A Decode request is dispatched to {node_url}')
-
-    start = node_manager.pre_call(decode_node_url, EngineRole.Decode)
-    if request.stream is True:
-        response = node_manager.stream_generate(request_dict, decode_node_url, '/v1/completions')
-        background_task = node_manager.create_background_tasks(node_url, start)
-        return StreamingResponse(response, background=background_task)
-    else:
-        response = await node_manager.generate(request_dict, decode_node_url, '/v1/completions')
-        node_manager.post_call(node_url, start)
-        return JSONResponse(json.loads(response))
+    # start = node_manager.pre_call(decode_node_url, EngineRole.Decode)
+    # if request.stream is True:
+    #     response = node_manager.stream_generate(request_dict, decode_node_url, '/v1/chat/completions')
+    #     background_task = node_manager.create_background_tasks(node_url, start)
+    #     return StreamingResponse(response, background=background_task)
+    # else:
+    #     response = await node_manager.generate(request_dict, decode_node_url, '/v1/chat/completions')
+    #     node_manager.post_call(node_url, start)
+    #     return JSONResponse(json.loads(response))
 
 
 def proxy(server_name: str = '0.0.0.0',
