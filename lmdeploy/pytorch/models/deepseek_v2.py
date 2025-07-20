@@ -58,6 +58,17 @@ class BatchWorker:
     def done(self):
         return self.output is not None
 
+def compute_topk_ids(topk_ids, ranks, num_experts):
+    shape = topk_ids.shape
+    step = num_experts // ranks  # 计算步长
+    # 计算每个位置的值：(index // ranks) 决定起始点，然后 + (index % ranks) * step
+    # 并对 num_experts 取模防止越界
+    topk_ids = (
+        (torch.arange(0, topk_ids.numel(), dtype=topk_ids.dtype, device=topk_ids.device) // ranks) % step
+        + (torch.arange(0, topk_ids.numel(), dtype=topk_ids.dtype, device=topk_ids.device) % ranks) * step
+    ) % num_experts
+    topk_ids = topk_ids.reshape(shape)
+    return topk_ids
 
 def execute_batch(inputs: list, fn, delta_stages: int = 0, exec_type: ExecType = ExecType.One, extern_tag: str = ''):
     worker_list = [BatchWorker(str(idx), fn(**input, tag=str(idx) + extern_tag)) for idx, input in enumerate(inputs)]
@@ -724,6 +735,10 @@ class DeepseekV2MoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
         topk_weights, topk_ids = self.gate(hidden_states)
 
+        if True:
+            ranks = torch.distributed.get_world_size()
+            topk_ids = compute_topk_ids(topk_ids, ranks, self.num_experts)
+
         out_states = self.experts(
             hidden_states,
             topk_weights,
@@ -897,6 +912,10 @@ class DeepseekV2DecoderLayer(nn.Module):
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         topk_weights, topk_idx = self.mlp.gate(hidden_states)
+
+        if True:
+            ranks = torch.distributed.get_world_size()
+            topk_idx = compute_topk_ids(topk_idx, ranks, self.mlp.num_experts)
 
         topk_weights = self.mlp.experts.renormalize(topk_weights)
         topk_weights = topk_weights.to(torch.float32)

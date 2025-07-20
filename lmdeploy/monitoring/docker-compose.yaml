@@ -2,7 +2,7 @@
 version: '3'
 services:
   prometheus:
-    image: prom/prometheus:latest
+    image: pjlab-shanghai-acr-registry.cn-shanghai.cr.aliyuncs.com/pjlab-eflops/llm:prometheus
     container_name: prometheus
     network_mode: host
     volumes:
@@ -12,7 +12,7 @@ services:
       - '--storage.tsdb.path=/prometheus'
 
   grafana:
-    image: grafana/grafana:latest
+    image: pjlab-shanghai-acr-registry.cn-shanghai.cr.aliyuncs.com/pjlab-eflops/llm:grafana
     container_name: grafana
     network_mode: host
     volumes:

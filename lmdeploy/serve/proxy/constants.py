@@ -20,6 +20,9 @@ class RoutingStrategy(enum.Enum):
     RANDOM = enum.auto()
     MIN_EXPECTED_LATENCY = enum.auto()
     MIN_OBSERVED_LATENCY = enum.auto()
+    ROUND_ROBIN = enum.auto()
+    BATCH_SIZE_BALANCE = enum.auto()
+    KV_CACHE_BALANCE = enum.auto()
 
     @classmethod
     def from_str(cls, name):
@@ -30,6 +33,12 @@ class RoutingStrategy(enum.Enum):
             return cls.MIN_EXPECTED_LATENCY
         elif name == 'min_observed_latency':
             return cls.MIN_OBSERVED_LATENCY
+        elif name == 'round_robin':
+            return cls.ROUND_ROBIN
+        elif name == 'kv_cache_balance':
+            return cls.KV_CACHE_BALANCE
+        elif name == 'batch_size_balance':
+            return cls.BATCH_SIZE_BALANCE
         else:
             raise ValueError(f'Invalid strategy: {name}. Supported: random, '
                              f'min_expected_latency, min_observed_latency.')
