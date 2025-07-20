@@ -308,6 +308,9 @@ class AsyncEngine(LogitsMixin):
         # build stat loggers
         self._build_stat_loggers()
 
+    def get_kv_cache_usage(self):
+        return self.engine.kvcache_usage()
+
     def close(self):
         self.internal_thread.close()
         self.free_insts = None

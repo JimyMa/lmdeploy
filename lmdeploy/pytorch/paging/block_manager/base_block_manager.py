@@ -274,6 +274,12 @@ class BaseBlockManager:
             return self.allocate_msg(data, prealloc_size)
         else:
             raise TypeError(f'Unsupported allocate type: {type(data)}')
+        
+    def get_usage(self) -> float:
+        """Get the KV cache usage.
+        (between 0.0 and 1.0).
+        """
+        return 1.0 - (self.get_num_free_gpu_blocks() / self.num_gpu_blocks)
 
     def get_num_free_gpu_blocks(self) -> int:
         """Get number of free gpu blocks."""

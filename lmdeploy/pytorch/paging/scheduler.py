@@ -93,6 +93,14 @@ class Scheduler:
         """Get waiting sequence."""
         seq_map = self.seq_manager.get_sequences(MessageStatus.MIGRATION_DONE)
         return list(seq_map.values())
+    
+    def kvcache_usage(self):
+        """Get the KV cache usage.
+
+        The KV cache usage (between 0.0 and 1.0).
+        """
+        usage = self.block_manager.get_usage()
+        return usage
 
     def build_eviction_helper(self, eviction_type: str):
         if eviction_type == 'copy':

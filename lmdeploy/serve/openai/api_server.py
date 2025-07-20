@@ -113,6 +113,9 @@ def available_models():
         model_cards.append(ModelCard(id=model_name, root=model_name, permission=[ModelPermission()]))
     return ModelList(data=model_cards)
 
+@router.get('/metrics/kvcache', dependencies=[Depends(check_api_key)])
+def get_kvcache_usage():
+    return VariableInterface.async_engine.get_kv_cache_usage()
 
 def create_error_response(status: HTTPStatus, message: str, error_type='invalid_request_error'):
     """Create error response according to http status and message.

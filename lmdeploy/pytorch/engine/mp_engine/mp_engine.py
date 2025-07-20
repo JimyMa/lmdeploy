@@ -179,6 +179,7 @@ class MPEngine:
         engine.start_loop()
         instance_pool = EngineInstancePool(engine)
 
+        server.register_method('kvcache_usage', engine.kvcache_usage)
         server.register_method('end_session', engine.end_session)
         server.register_method('get_engine_config', engine.get_engine_config)
         server.register_method('get_model_config', engine.get_model_config)
@@ -216,6 +217,10 @@ class MPEngine:
 
     def start_loop(self) -> None:
         """Start mp engine loop."""
+
+    def kvcache_usage(self):
+        # logger.error(f"mp_engine.py receive")
+        return self._collective_rpc('kvcache_usage')
 
     def end_session(self, session_id: int):
         """End session."""

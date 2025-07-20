@@ -618,6 +618,11 @@ class Engine:
     def model_config(self) -> ModelConfig:
         """Model config."""
         return self.executor.model_config
+    
+    def kvcache_usage(self):
+        kvcache_usage = self.scheduler.kvcache_usage()
+        # logger.error(f"engine usage: {kvcache_usage}")
+        return kvcache_usage
 
     @property
     def gpu_count(self):
