@@ -310,6 +310,9 @@ class AsyncEngine(LogitsMixin):
 
     def get_kv_cache_usage(self):
         return self.engine.kvcache_usage()
+    
+    def get_batch_size(self):
+        return self.engine.get_batch_size()
 
     def close(self):
         self.internal_thread.close()

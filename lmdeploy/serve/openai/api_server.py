@@ -117,6 +117,10 @@ def available_models():
 def get_kvcache_usage():
     return VariableInterface.async_engine.get_kv_cache_usage()
 
+@router.get('/metrics/batchsize', dependencies=[Depends(check_api_key)])
+def get_kvcache_usage():
+    return VariableInterface.async_engine.get_batch_size()
+
 def create_error_response(status: HTTPStatus, message: str, error_type='invalid_request_error'):
     """Create error response according to http status and message.
 

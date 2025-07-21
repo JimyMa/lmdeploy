@@ -179,6 +179,7 @@ class MPEngine:
         engine.start_loop()
         instance_pool = EngineInstancePool(engine)
 
+        server.register_method('get_batch_size', engine.get_batch_size)
         server.register_method('kvcache_usage', engine.kvcache_usage)
         server.register_method('end_session', engine.end_session)
         server.register_method('get_engine_config', engine.get_engine_config)
@@ -221,6 +222,10 @@ class MPEngine:
     def kvcache_usage(self):
         # logger.error(f"mp_engine.py receive")
         return self._collective_rpc('kvcache_usage')
+    
+    def get_batch_size(self):
+        # logger.error(f"mp_engine.py receive")
+        return self._collective_rpc('get_batch_size')
 
     def end_session(self, session_id: int):
         """End session."""

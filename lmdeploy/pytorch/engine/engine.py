@@ -623,6 +623,9 @@ class Engine:
         kvcache_usage = self.scheduler.kvcache_usage()
         # logger.error(f"engine usage: {kvcache_usage}")
         return kvcache_usage
+    
+    def get_batch_size(self):
+        return self.scheduler.num_running()
 
     @property
     def gpu_count(self):
