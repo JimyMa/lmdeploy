@@ -991,29 +991,30 @@ class Engine:
             if not migration_running and not self.scheduler.has_migration_waiting():
                 await self.migration_event.wait()
             elif migration_running:
-                self.migration_event.clear()
-                for msg in migration_running:
-                    migration_execution_requests: List[Tuple[int, List[Tuple[int, int]]]] = []
-                    migration_request = msg.migration_request
-                    prefill_block_ids = migration_request.remote_block_ids
-                    decode_block_ids = list(self.scheduler.block_manager.get_block_table(msg=msg))
+                pass
+                # self.migration_event.clear()
+                # for msg in migration_running:
+                #     migration_execution_requests: List[Tuple[int, List[Tuple[int, int]]]] = []
+                #     migration_request = msg.migration_request
+                #     prefill_block_ids = migration_request.remote_block_ids
+                #     decode_block_ids = list(self.scheduler.block_manager.get_block_table(msg=msg))
 
-                    if not migration_request.is_dummy_prefill:
-                        assert len(prefill_block_ids) == len(decode_block_ids), (
-                            f'#prefill block ids ({len(prefill_block_ids)}) must equal to '
-                            f'#decode block ids ({len(decode_block_ids)})'
-                            f'all id length: {len(msg.num_token_ids)}')
-                        migration_execution_requests.append((
-                            migration_request.remote_engine_id,
-                            list(zip(prefill_block_ids, decode_block_ids)),
-                        ))
-                        migration_inputs = MigrationExecutionBatch(protocol=migration_request.protocol,
-                                                                   requests=migration_execution_requests)
-                        logger.info(f'migrating session: {msg.session_id} begin')
-                        await self.executor.migrate(migration_inputs)
-                        logger.info(f'migrating session: {msg.session_id} done')
-                        await self.engine_conn.zmq_send(remote_engine_id=migration_request.remote_engine_id,
-                                                        remote_session_id=migration_request.remote_session_id)
+                #     if not migration_request.is_dummy_prefill:
+                #         assert len(prefill_block_ids) == len(decode_block_ids), (
+                #             f'#prefill block ids ({len(prefill_block_ids)}) must equal to '
+                #             f'#decode block ids ({len(decode_block_ids)})'
+                #             f'all id length: {len(msg.num_token_ids)}')
+                #         migration_execution_requests.append((
+                #             migration_request.remote_engine_id,
+                #             list(zip(prefill_block_ids, decode_block_ids)),
+                #         ))
+                #         migration_inputs = MigrationExecutionBatch(protocol=migration_request.protocol,
+                #                                                    requests=migration_execution_requests)
+                #         logger.info(f'migrating session: {msg.session_id} begin')
+                #         await self.executor.migrate(migration_inputs)
+                #         logger.info(f'migrating session: {msg.session_id} done')
+                #         await self.engine_conn.zmq_send(remote_engine_id=migration_request.remote_engine_id,
+                #                                         remote_session_id=migration_request.remote_session_id)
 
                 # generate output
                 outputs: Dict[int, InferOutput] = dict()
