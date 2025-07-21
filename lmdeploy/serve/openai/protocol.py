@@ -108,6 +108,7 @@ class ChatCompletionRequest(BaseModel):
     model: str
 
     messages: Union[str, List[Dict[str, Any]]] = Field(examples=[[{'role': 'user', 'content': 'hi'}]])  # noqa
+    input_ids: Optional[List] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     tools: Optional[List[Tool]] = Field(default=None, examples=[None])
