@@ -18,7 +18,7 @@ from lmdeploy.pytorch.nn.linear import build_merged_colwise_linear, build_qkv_pr
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
 from .utils.cudagraph import CudaGraphMeta, CudaGraphMixin, next_power_of_2
-from .utils.model import DeployModelMixin
+from .utils.model import DeployModelMixin, vlm_model
 
 
 class Qwen2_5_PatchEmbed(nn.Module):
@@ -54,6 +54,7 @@ class Qwen2_5_PatchEmbed(nn.Module):
         return hidden_states
 
 
+@vlm_model
 class Qwen2_5_VisionRotaryEmbedding(nn.Module):
     """Vision rotary embedding."""
 
