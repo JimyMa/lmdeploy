@@ -582,14 +582,20 @@ class AsyncEngine(LogitsMixin):
         """
         return self.infer(prompts, gen_config, do_preprocess, adapter_name, stream_response, multiplex=True, **kwargs)
 
-    async def _get_prompt_input(self,
-                                prompt: str,
-                                do_preprocess: bool,
-                                sequence_start: bool,
-                                adapter_name: str,
-                                tools: Optional[List[object]] = None,
-                                enable_thinking: Optional[bool] = None,
-                                **kwargs):
+    async def _get_prompt_input(
+        self,
+        do_preprocess: bool,
+        sequence_start: bool,
+        adapter_name: str,
+        prompt: Optional[str] = None,
+        tools: Optional[List[object]] = None,
+        enable_thinking: Optional[bool] = None,
+        input_ids: Optional[List] = None,
+        **kwargs,
+    ):
+        if prompt is None and input_ids is not None:
+            return {'prompt': None, 'input_ids': input_ids}
+
         if do_preprocess:
             # use adapter's chat template if possible
             chat_template = self.chat_template
@@ -639,22 +645,23 @@ class AsyncEngine(LogitsMixin):
             await generator.aclose()
 
     async def generate(
-            self,
-            messages,
-            session_id: int,
-            gen_config: Optional[GenerationConfig] = None,
-            tools: Optional[List[object]] = None,
-            stream_response: bool = True,
-            sequence_start: bool = True,
-            sequence_end: bool = True,  # no interactive mode by default
-            step: int = 0,
-            do_preprocess: bool = True,
-            adapter_name: Optional[str] = None,
-            skip_stop_tokens: bool = True,
-            rewind_stop_tokens: bool = False,
-            input_ids: Optional[List] = None,
-            enable_thinking: Optional[bool] = None,
-            **kwargs):
+        self,
+        messages,
+        session_id: int,
+        gen_config: Optional[GenerationConfig] = None,
+        tools: Optional[List[object]] = None,
+        stream_response: bool = True,
+        sequence_start: bool = True,
+        sequence_end: bool = True,  # no interactive mode by default
+        step: int = 0,
+        do_preprocess: bool = True,
+        adapter_name: Optional[str] = None,
+        skip_stop_tokens: bool = True,
+        rewind_stop_tokens: bool = False,
+        input_ids: Optional[List] = None,
+        enable_thinking: Optional[bool] = None,
+        **kwargs,
+    ):
         """Generate responses.
 
         Args:
@@ -701,22 +708,27 @@ class AsyncEngine(LogitsMixin):
             logger.ERROR(f"n({gen_config.n}) > 1 hasn't been supported yet. "
                          f'Fallback to 1')
             gen_config.n = 1
-        if messages:
+        if messages or input_ids:
             prompt = messages
             self.request_logger.log_prompt(session_id=session_id, prompt=prompt)
-            prompt_input = await self._get_prompt_input(prompt,
-                                                        do_preprocess,
-                                                        sequence_start,
-                                                        adapter_name,
-                                                        tools=tools,
-                                                        enable_thinking=enable_thinking)
+            prompt_input = await self._get_prompt_input(
+                prompt,
+                do_preprocess,
+                sequence_start,
+                adapter_name,
+                tools=tools,
+                enable_thinking=enable_thinking,
+                input_ids=input_ids,
+            )
             prompt = prompt_input['prompt']
             input_ids = prompt_input['input_ids']
-            self.request_logger.log_inputs(session_id=session_id,
-                                           prompt=prompt,
-                                           prompt_token_ids=input_ids,
-                                           gen_config=gen_config,
-                                           adapter_name=adapter_name)
+            self.request_logger.log_inputs(
+                session_id=session_id,
+                prompt=prompt,
+                prompt_token_ids=input_ids,
+                gen_config=gen_config,
+                adapter_name=adapter_name,
+            )
             logger.info(f'session={session_id}, '
                         f'history_tokens={self.id2step[session_id]}, '
                         f'input_tokens={len(input_ids)}, '

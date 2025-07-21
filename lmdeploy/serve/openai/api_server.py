@@ -690,6 +690,8 @@ async def completions_v1(raw_request: Request = None):
         request.prompt = [request.prompt]
     if isinstance(request.stop, str):
         request.stop = [request.stop]
+    if isinstance(request.input_ids, List):
+        request.input_ids = [request.input_ids]
     random_seed = request.seed if request.seed else None
 
     gen_config = GenerationConfig(max_new_tokens=request.max_tokens if request.max_tokens else 512,
@@ -709,16 +711,19 @@ async def completions_v1(raw_request: Request = None):
                                   with_cache=with_cache,
                                   preserve_cache=preserve_cache)
     generators = []
-    for i in range(len(request.prompt)):
+    for i in range(len(request.input_ids)):
+
+        # logger.error(f'input_ids: {request.input_ids}')
         result_generator = VariableInterface.async_engine.generate(
-            request.prompt[i],
+            request.prompt[i] if request.prompt is not None else None,
             request.session_id + i,
             gen_config=gen_config,
             stream_response=True,  # always use stream to enable batching
             sequence_start=True,
             sequence_end=True,
             do_preprocess=False,
-            adapter_name=adapter_name)
+            adapter_name=adapter_name,
+            input_ids=request.input_ids[i] if request.input_ids is not None else None)
         generators.append(result_generator)
 
     def create_stream_response_json(index: int,
