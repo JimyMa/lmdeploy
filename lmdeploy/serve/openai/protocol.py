@@ -257,7 +257,7 @@ class ChatCompletionStreamResponse(BaseModel):
 class CompletionRequest(BaseModel):
     """Completion request."""
     model: str
-    prompt: Union[str, List[Any]]
+    prompt: Optional[Union[str, List[Any]]] = None
     suffix: Optional[str] = None
     temperature: Optional[float] = 0.7
     n: Optional[int] = 1
@@ -280,6 +280,7 @@ class CompletionRequest(BaseModel):
     top_k: Optional[int] = 40  # for opencompass
     seed: Optional[int] = None
     min_p: float = 0.0
+    input_ids: Optional[List] = None
 
 
 class CompletionResponseChoice(BaseModel):
@@ -394,6 +395,7 @@ class GenerateRequest(BaseModel):
     seed: Optional[int] = None
     min_new_tokens: Optional[int] = Field(default=None, examples=[None])
     min_p: float = 0.0
+    input_ids: Optional[List] = None
 
 
 class GenerateResponse(BaseModel):
