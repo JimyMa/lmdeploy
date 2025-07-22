@@ -35,7 +35,6 @@ logger = get_logger('lmdeploy')
 
 history_itl_count = 500
 
-
 class Status(BaseModel):
     """Status protocol consists of models' information."""
     role: EngineRole = EngineRole.Hybrid
@@ -46,7 +45,6 @@ class Status(BaseModel):
     kvcache_usage: Optional[float] = 0
     total_token_nums: Optional[int] = 0
     history_itl: Deque[int] = deque(maxlen=history_itl_count)
-
 
 class Node(BaseModel):
     """Node protocol consists of url and status."""
@@ -93,8 +91,8 @@ class NodeManager:
 
         self.cache_status = cache_status
         self.latencies = dict()
-        self.config_path = config_path
-        print(f'config_path: {self.config_path}')
+        self.config_path = osp.join(osp.dirname(osp.realpath(__file__)), 'proxy_config.json')
+        print(f"config_path: {self.config_path}")
         if config_path is not None:
             self.config_path = config_path
         if osp.exists(self.config_path) and self.cache_status:
@@ -112,7 +110,7 @@ class NodeManager:
         else:
             # 如果不存在配置文件或者 cache_status 为 False，初始化为空字典
             self.node_locks = {}
-
+ 
         self.heart_beat_thread = threading.Thread(target=heart_beat_controller, args=(self, ), daemon=True)
         self.heart_beat_thread.start()
         self.aiotimeout = aiohttp.ClientTimeout(total=AIOHTTP_TIMEOUT)
@@ -121,7 +119,7 @@ class NodeManager:
         self.migration_protocol = MigrationProtocol[migration_protocol]
         self.rdma_config = DistServeRDMAConfig(with_gdr=with_gdr, link_type=RDMALinkType[link_type])
         self.pd_connection_pool = PDConnectionPool()
-        self.initialized = False
+        self.dummy_prefill = False
 
         # For round_robin strategy
         self.prefill_index = 0
@@ -139,21 +137,17 @@ class NodeManager:
         self.kvcache_collector_task = None
         self.kvcache_running = False
 
-        # if self.routing_strategy == RoutingStrategy.KV_CACHE_BALANCE:
         # 启动异步收集线程
         self.kvcache_running = True
         self.kvcache_collector_thread = threading.Thread(target=self._run_kvcache_collector, daemon=True)
         self.kvcache_collector_thread.start()
 
-        # if self.routing_strategy in [RoutingStrategy.KV_CACHE_BALANCE, RoutingStrategy.BATCH_SIZE_BALANCE]:
         self.metric_logger_thread = threading.Thread(target=self._log_metrics_loop, daemon=True)
         self.metric_logger_thread.start()
 
     def get_nodes(self, role: EngineRole) -> Dict:
-        if isinstance(role, EngineRole):
-            role = [role]
         items = list(self.nodes.items())
-        return {node_url: node_status for (node_url, node_status) in items if node_status.role in role}
+        return {node_url: node_status for (node_url, node_status) in items if node_status.role == role}
 
     @property
     def hybrid_nodes(self):
@@ -449,7 +443,7 @@ class NodeManager:
             average_speed = sum(speeds) / len(speeds) if len(speeds) else 1
             all_the_speeds = speeds + [average_speed] * len(urls_without_speeds)
             return all_matched_urls, all_the_speeds
-
+        
         def update_token_count(selected_url):
             """更新选中节点的token计数."""
             if selected_url and prefill_length > 0:
@@ -632,7 +626,7 @@ class NodeManager:
         try:
             request['stream_options'] = {'include_usage': True}  # 添加stream_options字段，用于统计Decode的KV Cache使用量
             async with aiohttp.ClientSession() as session:
-                # print(f"proxy request: {request}")
+                # print(f"proxy request: {request}",flush=True)
                 async with session.post(node_url + endpoint, json=request, timeout=self.aiotimeout) as response:
                     async for line in response.content:
                         # print(f"stream output line: {line}")
@@ -836,6 +830,12 @@ async def connection_warmup():
     return JSONResponse({'SUCCESS': True})
 
 
+@app.post('/distserve/gc')
+async def cache_block_gc_to_be_migrated():
+    # TODO (JimyMa): add garbage collection of to be migrated request
+    raise NotImplementedError
+
+
 @app.post('/v1/chat/completions', dependencies=[Depends(check_api_key)])
 async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Request = None):
     """Completion API similar to OpenAI's API.
@@ -892,7 +892,6 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
     - presence_penalty (replaced with repetition_penalty)
     - frequency_penalty (replaced with repetition_penalty)
     """
-
     check_response = await node_manager.check_request_model(request.model)
     if check_response is not None:
         return check_response
@@ -916,59 +915,69 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
     elif node_manager.serving_strategy == ServingStrategy.DistServe:
         request_dict = request.model_dump()
 
-        # # Prefill
-        # prefill_request_dict = copy.deepcopy(request_dict)
-        # prefill_request_dict['max_tokens'] = 1
-        # prefill_request_dict['stream'] = False
-        # prefill_request_dict['with_cache'] = True
-        # prefill_request_dict['preserve_cache'] = True
+        # Prefill
+        prefill_request_dict = copy.deepcopy(request_dict)
+        prefill_request_dict['max_tokens'] = 1
+        prefill_request_dict['stream'] = False
+        prefill_request_dict['with_cache'] = True
+        prefill_request_dict['preserve_cache'] = True
 
-        # p_url = node_manager.get_node_url(request.model, EngineRole.Prefill)
-        # if not p_url:
-        #     return node_manager.handle_unavailable_model(request.model)
-        # logger.info(f'A Prefill request is dispatched to {p_url}')
+        prefill_info = {}
+        p_url = 'dummy:dummy'
+        if not node_manager.dummy_prefill:
+            p_url = node_manager.get_node_url(request.model, EngineRole.Prefill)
+            if not p_url:
+                return node_manager.handle_unavailable_model(request.model)
+            logger.info(f'A Prefill request is dispatched to {p_url}')
 
-        # start = node_manager.pre_call(p_url)
-        # prefill_info = json.loads(await node_manager.generate(prefill_request_dict,
-        #                                                       p_url,
-        #                                                       '/v1/chat/completions'))
-        # node_manager.post_call(p_url, start)
+            start = node_manager.pre_call(p_url)
+            prefill_info = json.loads(await node_manager.generate(prefill_request_dict, p_url, '/v1/chat/completions'))
+            node_manager.post_call(p_url, start)
 
         # # Decode
-        # TODO: add prefill length
-        d_url = node_manager.get_node_url(request.model, EngineRole.Decode, len(request.input_ids))
+        d_url = node_manager.get_node_url(request.model, EngineRole.Decode)
         if not d_url:
             return node_manager.handle_unavailable_model(request.model)
         logger.info(f'A Decode request is dispatched to {d_url}')
 
-        # if not node_manager.pd_connection_pool.is_connected(p_url, d_url):
-        #     await node_manager.pd_connection_pool.connect(
-        #         PDConnectionMessage(
-        #             p_url=p_url,
-        #             d_url=d_url,
-        #             protocol=node_manager.migration_protocol,
-        #             rdma_config=node_manager.rdma_config,
-        #         ))
+        if not node_manager.dummy_prefill:
+            if not node_manager.pd_connection_pool.is_connected(p_url, d_url):
+                await node_manager.pd_connection_pool.connect(
+                    PDConnectionMessage(
+                        p_url=p_url,
+                        d_url=d_url,
+                        protocol=node_manager.migration_protocol,
+                        rdma_config=node_manager.rdma_config,
+                    ))
+
+        remote_session_id = int(prefill_info.get('id')) if prefill_info.get('id') else 0
+        remote_block_ids = prefill_info.get('cache_block_ids') or []
+        remote_token_id = prefill_info.get('remote_token_ids')[-1] if prefill_info.get('remote_token_ids') else 0
+
         request_dict['migration_request'] = MigrationRequest(
             protocol=node_manager.migration_protocol,
-            remote_engine_id='ddd',
-            remote_session_id=0,
-            remote_block_ids=[0],
-            remote_token_id=0,
-        ).model_dump(mode='json')
+            remote_engine_id=p_url,
+            remote_session_id=remote_session_id,
+            remote_block_ids=remote_block_ids,
+            remote_token_id=remote_token_id,
+            is_dummy_prefill=node_manager.dummy_prefill).model_dump(mode='json')
 
         start = node_manager.pre_call(d_url)
+        node_manager.pd_connection_pool.shelf_prefill_session((p_url, d_url), prefill_info['id'])
         if request.stream is True:
             response = node_manager.stream_generate(request_dict, d_url, '/v1/chat/completions')
             background_task = node_manager.create_background_tasks(d_url, start)
-            return StreamingResponse(response, background=background_task)
+            resp = StreamingResponse(response, background=background_task)
         else:
-            try:
-                response = await node_manager.generate(request_dict, d_url, '/v1/chat/completions')
-                node_manager.post_call(d_url, start)
-                resp = JSONResponse(json.loads(response))
-            finally:
-                return resp
+            response = await node_manager.generate(request_dict, d_url, '/v1/chat/completions')
+            node_manager.post_call(d_url, start)
+            resp = JSONResponse(json.loads(response))
+
+        if not node_manager.dummy_prefill:
+            node_manager.pd_connection_pool.unshelf_prefill_session((p_url, d_url), prefill_info['id'])
+
+        return resp
+
     else:
         raise ValueError(f'No serving strategy named {node_manager.serving_strategy}')
 
@@ -1031,21 +1040,21 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
             return JSONResponse(json.loads(response))
     elif node_manager.serving_strategy == ServingStrategy.DistServe:
         request_dict = request.model_dump()
-        prefill_info = {}
-        p_url = ''
-        d_url = ''
-        # p_url = node_manager.get_node_url(request.model, EngineRole.Prefill)
-        dummy = True
 
         # Prefill
-        if not dummy:
-            prefill_request_dict = copy.deepcopy(request_dict)
-            prefill_request_dict['max_tokens'] = 1
-            prefill_request_dict['stream'] = False
-            prefill_request_dict['with_cache'] = True
-            prefill_request_dict['preserve_cache'] = True
+        prefill_request_dict = copy.deepcopy(request_dict)
+        prefill_request_dict['max_tokens'] = 1
+        prefill_request_dict['stream'] = False
+        prefill_request_dict['with_cache'] = True
+        prefill_request_dict['preserve_cache'] = True
 
-            p_url = node_manager.get_node_url(request.model, EngineRole.Prefill)
+        if not node_manager.dummy_prefill:
+            try:
+                p_url = node_manager.get_node_url(request.model, EngineRole.Prefill)
+            except Exception as e:
+                logger.error(f'error Msg: {str(e)}')
+                return {'status': 'Instance sch error, cannot find available p_url'}
+
             if not p_url:
                 return node_manager.handle_unavailable_model(request.model)
             logger.info(f'A Prefill request is dispatched to {p_url}')
@@ -1053,40 +1062,60 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
             start = node_manager.pre_call(p_url)
             prefill_info = json.loads(await node_manager.generate(prefill_request_dict, p_url, '/v1/completions'))
             node_manager.post_call(p_url, start)
+        else:
+            p_url = 'dummy:dummy'
+            prefill_info = {}
 
-        # # Decode
-        d_url = node_manager.get_node_url(request.model, EngineRole.Decode, len(request.input_ids))
+        # Decode
+        try:
+            d_url = node_manager.get_node_url(request.model, EngineRole.Decode)
+        except Exception as e:
+            logger.error(f'error Msg: {str(e)}')
+            return {'status': 'Instance sch error, cannot find available p_url'}
 
         if not d_url:
             return node_manager.handle_unavailable_model(request.model)
         logger.info(f'A Decode request is dispatched to {d_url}')
 
-        # if not node_manager.pd_connection_pool.is_connected(p_url, d_url):
-        #     await node_manager.pd_connection_pool.connect(
-        #         PDConnectionMessage(
-        #             p_url=p_url,
-        #             d_url=d_url,
-        #             protocol=node_manager.migration_protocol,
-        #             rdma_config=node_manager.rdma_config,
-        #         ))
+        if not node_manager.dummy_prefill:
+            if not node_manager.pd_connection_pool.is_connected(p_url, d_url):
+                try:
+                    await node_manager.pd_connection_pool.connect(
+                        PDConnectionMessage(
+                            p_url=p_url,
+                            d_url=d_url,
+                            protocol=node_manager.migration_protocol,
+                            rdma_config=node_manager.rdma_config,
+                        ))
+                except Exception as e:
+                    logger.error(f'error Msg: {str(e)}')
+                    return {'status': f'Connection error, cannot establish connection {(p_url, d_url)}'}
+            node_manager.pd_connection_pool.shelf_prefill_session((p_url, d_url), prefill_info['id'])
 
+        remote_session_id = int(prefill_info.get('id')) if prefill_info.get('id') else 0
+        remote_block_ids = prefill_info.get('cache_block_ids') or []
+        remote_token_id = prefill_info.get('remote_token_ids')[-1] if prefill_info.get('remote_token_ids') else 0
         request_dict['migration_request'] = MigrationRequest(
             protocol=node_manager.migration_protocol,
             remote_engine_id=p_url,
-            remote_session_id=prefill_info.get('id', 0),
-            remote_block_ids=prefill_info.get('cache_block_ids', [0]),
-            remote_token_id=prefill_info.get('remote_token_ids', [0])[-1],
-        ).model_dump(mode='json')
+            remote_session_id=remote_session_id,
+            remote_block_ids=remote_block_ids,
+            remote_token_id=remote_token_id,
+            is_dummy_prefill=node_manager.dummy_prefill).model_dump(mode='json')
 
         start = node_manager.pre_call(d_url)
         if request.stream is True:
             response = node_manager.stream_generate(request_dict, d_url, '/v1/completions')
             background_task = node_manager.create_background_tasks(d_url, start)
-            return StreamingResponse(response, background=background_task)
+            resp = StreamingResponse(response, background=background_task)
         else:
             response = await node_manager.generate(request_dict, d_url, '/v1/completions')
             node_manager.post_call(d_url, start)
-            return JSONResponse(json.loads(response))
+            node_manager.pd_connection_pool.unshelf_prefill_session((p_url, d_url), prefill_info.get('id'))
+            resp = JSONResponse(json.loads(response))
+        if not node_manager.dummy_prefill:
+            node_manager.pd_connection_pool.unshelf_prefill_session((p_url, d_url), prefill_info.get('id'))
+        return resp
     else:
         raise ValueError(f'No serving strategy named {node_manager.serving_strategy}')
 
@@ -1101,6 +1130,7 @@ def proxy(server_name: str = '0.0.0.0',
           disable_cache_status: bool = False,
           link_type: Literal['RoCE', 'IB'] = 'RoCE',
           migration_protocol: Literal['RDMA'] = 'RDMA',
+          dummy_prefill: bool = False,
           **kwargs):
     """To launch the proxy server.
 
@@ -1122,10 +1152,9 @@ def proxy(server_name: str = '0.0.0.0',
     """  # noqa
     global node_manager
     node_manager = NodeManager(serving_strategy=serving_strategy,
-                               routing_strategy=routing_strategy,
-                               config_path=osp.join(osp.dirname(osp.realpath(__file__)),
-                                                    f'{server_port}_{serving_strategy}_proxy_config.json'))
+                               routing_strategy=routing_strategy)
     node_manager.migration_protocol = MigrationProtocol[migration_protocol]
+    node_manager.dummy_prefill = dummy_prefill
 
     node_manager.rdma_config = DistServeRDMAConfig(
         link_type=RDMALinkType[link_type],

@@ -89,6 +89,7 @@ class NodeManager:
         self.cache_status = cache_status
         self.latencies = dict()
         self.config_path = osp.join(osp.dirname(osp.realpath(__file__)), 'proxy_config.json')
+        print(f"config_path: {self.config_path}")
         if config_path is not None:
             self.config_path = config_path
         if osp.exists(self.config_path) and self.cache_status:
