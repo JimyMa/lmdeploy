@@ -163,7 +163,6 @@ class IterationStats:
             req_stats.first_token_ts = engine_core_timestamp
         else:
             tpot = engine_core_timestamp - req_stats.last_token_ts
-            assert tpot > 0.0, f'TPOT cannot be negative: {tpot:.6f}'
             self.time_per_output_tokens_iter.append(tpot)
 
         req_stats.last_token_ts = engine_core_timestamp
