@@ -346,6 +346,7 @@ class NodeManager:
             node_url (str): the node url.
             endpoint (str): the endpoint. Such as `/v1/chat/completions`.
         """
+        request['stream_options'] = {'include_usage': True}
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(node_url + endpoint, json=request, timeout=self.aiotimeout) as response:
