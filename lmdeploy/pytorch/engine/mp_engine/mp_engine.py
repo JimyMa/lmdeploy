@@ -34,7 +34,7 @@ class EngineInstancePool:
     def __init__(self, engine):
         from lmdeploy.pytorch.engine import Engine
         self.engine: Engine = engine
-        self.num_instance = self.engine.engine_config.max_batch_size
+        self.num_instance = self.engine.engine_config.max_batch_size + 2048
         self.pool = None
 
     def create_instance_pool(self, num_instance: int):
@@ -179,8 +179,7 @@ class MPEngine:
         engine.start_loop()
         instance_pool = EngineInstancePool(engine)
 
-        server.register_method('get_batch_size', engine.get_batch_size)
-        server.register_method('kvcache_usage', engine.kvcache_usage)
+        server.register_method('get_metrics', engine.get_metrics)
         server.register_method('end_session', engine.end_session)
         server.register_method('get_engine_config', engine.get_engine_config)
         server.register_method('get_model_config', engine.get_model_config)
@@ -218,14 +217,10 @@ class MPEngine:
 
     def start_loop(self) -> None:
         """Start mp engine loop."""
-
-    def kvcache_usage(self):
-        # logger.error(f"mp_engine.py receive")
-        return self._collective_rpc('kvcache_usage')
     
-    def get_batch_size(self):
+    def get_metrics(self):
         # logger.error(f"mp_engine.py receive")
-        return self._collective_rpc('get_batch_size')
+        return self._collective_rpc('get_metrics')
 
     def end_session(self, session_id: int):
         """End session."""

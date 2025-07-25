@@ -55,6 +55,7 @@ class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
+    queued_time: Optional[float] = None
 
 
 class Function(BaseModel):

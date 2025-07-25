@@ -62,6 +62,7 @@ class GenOut:
     logprobs: List[Dict[int, float]] = None
     logits: Any = None
     last_hidden_state: Any = None
+    queued_time: float = None
 
     # for disaggregation
     cache_block_ids: List[int] = None
@@ -295,11 +296,12 @@ class AsyncEngine(LogitsMixin):
         if self.stop_words is not None:
             self.stop_words = self.stop_words[0][0].tolist()
         self.backend = backend
-        self.instance_num = self.backend_config.max_batch_size
+        self.instance_num = self.backend_config.max_batch_size + 2048
         self.id2step = {}
         self.id2inst = {}
         self.free_insts: asyncio.Queue = None
         self.instances = [self.engine.create_instance() for _ in range(self.instance_num)]
+        logger.error(f"self.instance_num: {self.instance_num}, len(self.instances): {len(self.instances)}")
         self._session_id = count(0)
         self.request_logger = RequestLogger(max_log_len)
         self.internal_thread = _EventLoopThread(daemon=True)
@@ -308,11 +310,8 @@ class AsyncEngine(LogitsMixin):
         # build stat loggers
         self._build_stat_loggers()
 
-    def get_kv_cache_usage(self):
-        return self.engine.kvcache_usage()
-    
-    def get_batch_size(self):
-        return self.engine.get_batch_size()
+    def get_metrics(self):
+        return self.engine.get_metrics()
 
     def close(self):
         self.internal_thread.close()
@@ -770,6 +769,7 @@ class AsyncEngine(LogitsMixin):
             start_ids_offset = state.ids_offset
             response = ''
             finish_reason = None
+            queued_time = 0
             async with self.safe_run(inst,
                                      session_id=session_id,
                                      **prompt_input,
@@ -779,16 +779,29 @@ class AsyncEngine(LogitsMixin):
                                      sequence_start=sequence_start,
                                      sequence_end=sequence_end,
                                      step=history_len) as gen:
+                queued_ts = 0.0
+                scheduled_ts = 0.0
                 prev_len = 0
                 hit_stop_token = 0
                 req_state = RequestState(prompt_len=input_len)  # per-requst state
                 async for outputs in gen:
+                    logger.error(f"output: {outputs}")
+                    
+                    if queued_ts == 0.0 or scheduled_ts == 0.0:
+                        from lmdeploy.messages import EngineCoreEventType
+                        for event in outputs.metrics_info.engine_core_events:
+                            if event.type == EngineCoreEventType.QUEUED:
+                                queued_ts = event.timestamp
+                            elif event.type == EngineCoreEventType.SCHEDULED:
+                                scheduled_ts = event.timestamp
+
                     iteration_stats = IterationStats()  # per-iteration stats
                     # decode res
                     if is_error(outputs.status):
                         break
 
                     output_len = outputs.num_token
+                    # logger.error(f"outputs: {outputs.metrics_info.engine_core_events}")
                     metrics_processor.queue_update((input_len, prev_len, outputs, req_state, iteration_stats))
 
                     if hit_stop_token or prev_len == output_len:
@@ -816,13 +829,17 @@ class AsyncEngine(LogitsMixin):
                         spaces_between_special_tokens=gen_config.spaces_between_special_tokens)
                     res = token_ids[ids_offset:]
 
+                    # queued_time = req_state.stats.scheduled_ts - req_state.stats.queued_ts
+                    queued_time = scheduled_ts - queued_ts
+
                     out = GenOut(response,
                                  history_len,
                                  input_len,
                                  gen_len,
                                  finish_reason,
                                  token_ids=res,
-                                 cache_block_ids=outputs.cache_block_ids)
+                                 cache_block_ids=outputs.cache_block_ids,
+                                 queued_time=queued_time)
 
                     if outputs.logprobs is not None:
                         log_offset = ids_offset - start_ids_offset
@@ -856,7 +873,8 @@ class AsyncEngine(LogitsMixin):
                                  gen_len,
                                  finish_reason,
                                  token_ids=[],
-                                 cache_block_ids=outputs.cache_block_ids)
+                                 cache_block_ids=outputs.cache_block_ids,
+                                 queued_time=queued_time)
                 else:
                     logger.error(f'session {session_id} finished, '
                                  'reason "error"')

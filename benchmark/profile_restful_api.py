@@ -65,6 +65,9 @@ class RequestFuncOutput:
     latency: float = 0.0
     ttft: float = 0.0  # Time to first token
     itl: List[float] = field(default_factory=list)  # List of inter-token latencies
+    itl_total_token_index: List[int] = field(default_factory=list)
+    itl_new_token_index: List[int] = field(default_factory=list)
+    queueing_latency: float = 0.0
     prompt_len: int = 0
     error: str = ''
     output_len: int = 0
@@ -151,7 +154,6 @@ async def async_request_openai_completions(
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
-    print(f'api_url: {api_url}')
     assert api_url.endswith('completions'), "OpenAI Completions API URL must end with 'completions'."
 
     prompt = request_func_input.prompt
@@ -175,7 +177,10 @@ async def async_request_openai_completions(
 
         generated_text = ''
         ttft = 0.0
+        has_count_ttft = False
         st = time.perf_counter()
+        itl = []
+        last_token_idx=0
         most_recent_timestamp = st
         try:
             async with session.post(url=api_url, json=payload, headers=headers) as response:
@@ -195,24 +200,57 @@ async def async_request_openai_completions(
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
                             # want to check a token was generated
-                            if data['choices'][0]['text']:
-                                timestamp = time.perf_counter()
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = time.perf_counter() - st
-                                    output.ttft = ttft
+                            # if data['choices'][0]['text']:
+                            #     timestamp = time.perf_counter()
+                            #     # First token
+                            #     if ttft == 0.0:
+                            #         # print(f"TTFT data: {data}",flush=True)
+                            #         ttft = time.perf_counter() - st
+                            #         output.ttft = ttft
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
+                            #     # Decoding phase
+                            #     else:
+                            #         # print(f"TPOT data: {data}",flush=True)
+                            #         output.itl.append(timestamp - most_recent_timestamp)
 
+                            #     most_recent_timestamp = timestamp
+                            #     generated_text += data['choices'][0]['text']
+                            
+                            # 移除if判断，直接记录时间
+                            timestamp = time.perf_counter()
+                            # First token
+                            if has_count_ttft == False:
+                                # print(f"TTFT data: {data}", flush=True)
+                                ttft = time.perf_counter() - st
+                                output.ttft = 0
+                                output.queueing_latency = data['usage']['queued_time']
+                                output.itl.append(ttft)
+                                itl.append(ttft)
                                 most_recent_timestamp = timestamp
-                                generated_text += data['choices'][0]['text']
+                                has_count_ttft = True
+
+                                if data['usage']['completion_tokens'] and data['usage']['total_tokens']:
+                                    output.itl_new_token_index.append(data['usage']['completion_tokens']-last_token_idx)
+                                    output.itl_total_token_index.append(data['usage']['total_tokens'])
+                                    last_token_idx = data['usage']['completion_tokens']
+                            else:
+                                if data['choices'][0]['text']:
+                                    # print(f"TPOT data: {data}",flush=True)
+                                    output.itl.append(timestamp - most_recent_timestamp)
+                                    generated_text += data['choices'][0]['text']
+                                    itl.append(timestamp - most_recent_timestamp)
+                                    most_recent_timestamp = timestamp
+
+                                    if data['usage']['completion_tokens'] and data['usage']['total_tokens']:
+                                        output.itl_new_token_index.append(data['usage']['completion_tokens']-last_token_idx)
+                                        output.itl_total_token_index.append(data['usage']['total_tokens'])
+                                        last_token_idx = data['usage']['completion_tokens']
 
                     output.generated_text = generated_text
                     output.success = True
                     output.latency = latency
                     output.output_len = request_func_input.output_len
+                    # print(f"Request itl: {itl}, latency: {latency}")
                 else:
                     output.error = response.reason or ''
                     output.success = False
@@ -409,6 +447,22 @@ def download_and_cache_file(url: str, filename: Optional[str] = None):
 
     return filename
 
+def sample_unbalance_requests(small_input_len, small_output_len, long_input_len, long_output_len, num_prompts, long_ratio):
+    
+    result: List[Tuple[str, int, int]] = []
+    current = 0.0  # 用于累积长请求比例的计数器
+    
+    for _ in range(num_prompts):
+        current += long_ratio
+        if current >= 1.0:
+            # 插入长请求并重置计数器
+            result.append(('', long_input_len, long_output_len))
+            current -= 1.0
+        else:
+            # 插入短请求
+            result.append(('', small_input_len, small_output_len))
+    
+    return result
 
 def sample_sharegpt_requests(
     dataset_path: str,
@@ -565,6 +619,7 @@ def calculate_metrics(
     e2e_latencies: List[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
+            # print(f"outputs[{i}].itl: {outputs[i].itl}",flush=True)
             output_len = outputs[i].output_len
             output_lens.append(output_len)
             retokenized_output_len = len(tokenizer.encode(outputs[i].generated_text, add_special_tokens=False))
@@ -572,6 +627,7 @@ def calculate_metrics(
             total_input += input_requests[i][1]
             if output_len > 1:
                 tpots.append((outputs[i].latency - outputs[i].ttft) / (output_len - 1))
+                # tpots.append((outputs[i].latency / output_len))
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
 
@@ -655,11 +711,14 @@ async def benchmark(
         time.sleep(1.5)
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
+    request_ids: List[int] = []  # 记录请求ID（按发送顺序）
 
     benchmark_start_time = time.perf_counter()
     tasks: List[asyncio.Task] = []
+    idx = 0
     async for request in get_request(input_requests, request_rate):
         prompt, prompt_len, output_len = request
+        request_ids.append(idx)  # 分配递增的请求ID
         request_func_input = RequestFuncInput(
             model=model_id,
             # prompt=prompt,
@@ -671,6 +730,7 @@ async def benchmark(
             input_ids=[1] * prompt_len
         )
         tasks.append(asyncio.create_task(request_func(request_func_input=request_func_input, pbar=pbar)))
+        idx += 1
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     if pbar is not None:
@@ -685,6 +745,9 @@ async def benchmark(
         tokenizer=tokenizer,
         backend=backend,
     )
+
+    # 保存每个请求的详细指标到指定目录
+    save_request_details(request_ids, outputs)
 
     print('\n{s:{c}^{n}}'.format(s=' Serving Benchmark Result ', n=50, c='='))
     print('{:<40} {:<10}'.format('Backend:', backend))
@@ -796,6 +859,57 @@ async def benchmark(
     }
     return result
 
+def save_request_details(request_ids: List[int], outputs: List[RequestFuncOutput], base_dir: str = None):
+    """保存每个请求的详细指标到指定目录的CSV文件"""
+    # 设置默认目录
+    default_dir = "/nvme2/share/chenjiefei/scripts/csv/"
+    target_dir = base_dir or default_dir
+    
+    # 确保目录存在
+    os.makedirs(target_dir, exist_ok=True)
+    
+    # 生成带有时间戳的文件名，包含关键参数信息
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    model_name = args.model.split('/')[-1] if args.model else 'unknown_model'
+    req_count = len(request_ids)
+    rate_info = f"rate_{args.request_rate}" if not args.multi else f"multi_rates"
+    
+    filename = f"request_details_{args.backend}_{model_name}_{rate_info}_{req_count}req_{timestamp}.csv"
+    full_path = os.path.join(target_dir, filename)
+    
+    # 定义CSV字段
+    fieldnames = [
+        'request_id', 'prompt_len', 'output_len', 'queueing_latency', 'tpot',
+        'itl', 'itl_new_token_index', 'itl_total_token_index',
+        'success', 'error'
+    ]
+    
+    # 写入CSV文件
+    with open(full_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        
+        for req_id, output in zip(request_ids, outputs):
+            # 处理列表类型数据（转换为逗号分隔字符串）
+            itl_str = ','.join(f'{x:.6f}' for x in output.itl)
+            new_idx_str = ','.join(map(str, output.itl_new_token_index))
+            total_idx_str = ','.join(map(str, output.itl_total_token_index))
+            
+            writer.writerow({
+                'request_id': req_id,
+                'prompt_len': output.prompt_len,
+                'output_len': output.output_len,
+                'queueing_latency': f'{output.queueing_latency:.6f}',
+                'tpot': f'{(output.latency - output.ttft) / (output.output_len - 1):.6f}',
+                'itl': itl_str,
+                'itl_new_token_index': new_idx_str,
+                'itl_total_token_index': total_idx_str,
+                'success': output.success,
+                'error': output.error[:500]  # 限制错误信息长度
+            })
+    
+    print(f"请求详情已保存到: {full_path}")
+    return full_path
 
 def parse_request_rate_range(request_rate_range):
     if len(request_rate_range.split(',')) == 3:
@@ -910,6 +1024,15 @@ def run_benchmark(args_: argparse.Namespace):
             range_ratio=args.random_range_ratio,
             tokenizer=tokenizer,
             dataset_path=args.dataset_path,
+        )
+    elif args.dataset_name == 'unbalance':
+        input_requests = sample_unbalance_requests(
+            small_input_len=1024,
+            small_output_len=128,
+            long_input_len=320000,
+            long_output_len=128,
+            num_prompts=10000,
+            long_ratio=0.05,
         )
     else:
         raise ValueError(f'Unknown dataset: {args.dataset_name}')

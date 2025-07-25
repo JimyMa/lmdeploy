@@ -158,14 +158,14 @@ class Scheduler:
             nonlocal migrating_token_count
             migrating_token_count += seq.num_token_ids
 
-        def __evict_for_seq(seq: SchedulerSequence, waiting):
+        def __evict_for_seq(seq: SchedulerSequence, waiting, prealloc_size):
             """Evict until can append."""
             from itertools import chain
 
             hanging = reversed(self.hanging)
             waiting = reversed(waiting)
             evictable = list(chain(hanging, waiting))
-            return self.eviction_helper.evict_for_seq(seq, evictable, 0)
+            return self.eviction_helper.evict_for_seq(seq, evictable, prealloc_size)
 
         def _reorder_migrating():
             """Reorder waiting."""
@@ -175,14 +175,22 @@ class Scheduler:
 
         max_batches = self.scheduler_config.max_batches - self.num_running() - self.num_locked()
         while len(waiting_migration) > 0 and len(running_migration) < max_batches:
-            seq = waiting_migration.pop(0)
-            self.block_trie.match(waiting_migration)
-            if not __evict_for_seq(seq, waiting_migration):
-                break
 
-            # allocate session memory
-            self.block_manager.allocate(seq)
-            _to_running(seq)
+            seq = waiting_migration[0]
+            if self.block_manager.can_allocate(seq,seq.sampling_param.max_new_tokens):
+                seq = waiting_migration.pop(0)
+                self.block_trie.match(waiting_migration)
+                if not __evict_for_seq(seq, waiting_migration, seq.sampling_param.max_new_tokens):
+                    break
+
+                # allocate session memory
+                self.block_manager.allocate(seq,seq.sampling_param.max_new_tokens)
+                _to_running(seq)
+
+                seq.record_event(EngineCoreEventType.SCHEDULED)
+
+            else:
+                break
 
         return running_migration
 
@@ -253,13 +261,13 @@ class Scheduler:
         swap_in_map: Dict[int, int] = dict()
         copy_map: Dict[int, int] = dict()
 
-        def __evict_for_seq(seq: SchedulerSequence):
+        def __evict_for_seq(seq: SchedulerSequence, max_output_length):
             """Evict until can append."""
             from itertools import chain
             hanging = reversed(self.hanging)
             waiting = reversed(self.waiting)
             evictable = list(chain(hanging, waiting))
-            return eviction_helper.evict_for_seq(seq, evictable, prealloc_size)
+            return eviction_helper.evict_for_seq(seq, evictable, max_output_length)
 
         # 1. running
         for seq in running:
@@ -275,11 +283,11 @@ class Scheduler:
                 seq.set_step(0)
                 continue
 
-            if not __evict_for_seq(seq):
+            if not __evict_for_seq(seq, seq.sampling_param.max_new_tokens):
                 self._set_message_status(seq, MessageStatus.WAITING)
                 continue
 
-            self.block_manager.allocate(seq, prealloc_size)
+            # self.block_manager.allocate(seq, prealloc_size)
             self.block_trie.allocate(seq)
 
         return self.running, swap_in_map, swap_out_map, copy_map
@@ -339,7 +347,7 @@ class Scheduler:
 
     def has_unfinished(self):
         """Check if there are any unfinished message."""
-        return self.has_running() or self.has_waiting() or self.has_migration_done()
+        return self.has_running() or self.has_waiting() or self.has_migration_done() or self.has_migration_waiting()
 
     def has_running(self):
         return self.num_running() > 0
@@ -427,7 +435,7 @@ class Scheduler:
         """Make stats."""
         return {
             'running': self.num_running(),
-            'waiting': self.num_waiting(),
+            'waiting': self.num_waiting() + self.num_to_be_migrated() + self.num_migration_running() + self.num_migration_waiting() + self.num_migration_done() + self.num_migration_locked(),
             'locked': self.num_locked(),
             'free_gpu_blocks': self.block_manager.get_num_free_gpu_blocks(),
             'total_gpu_blocks': self.block_manager.num_gpu_blocks

@@ -619,13 +619,27 @@ class Engine:
         """Model config."""
         return self.executor.model_config
     
-    def kvcache_usage(self):
+    def get_metrics(self):
         kvcache_usage = self.scheduler.kvcache_usage()
-        # logger.error(f"engine usage: {kvcache_usage}")
-        return kvcache_usage
-    
-    def get_batch_size(self):
-        return self.scheduler.num_running()
+        num_running = self.scheduler.num_running() + self.scheduler.num_locked()
+        
+        # 提取各个组成部分
+        num_waiting_base = self.scheduler.num_waiting()
+        num_to_be_migrated = self.scheduler.num_to_be_migrated()
+        num_migration_waiting = self.scheduler.num_migration_waiting()
+        num_migration_running = self.scheduler.num_migration_running()
+        num_migration_locked = self.scheduler.num_migration_locked()
+        num_migration_done = self.scheduler.num_migration_done()
+        
+        # 计算总和
+        num_waiting = (num_waiting_base + num_to_be_migrated + num_migration_waiting +
+                    num_migration_running + num_migration_locked + num_migration_done)
+        
+        return {
+            "kvcache_usage": kvcache_usage,
+            "num_running": num_running,
+            "num_waiting": num_waiting
+        }
 
     @property
     def gpu_count(self):
@@ -987,61 +1001,56 @@ class Engine:
         return self.engine_conn.p2p_drop_connect(drop_conn_request)
 
     @torch.inference_mode()
-    async def _async_loop_migration(self, resp_que: asyncio.Queue, has_runable_event: asyncio.Event):
+    async def collect_migration_done(self, resp_que: asyncio.Queue, has_runnable_event):
         """Async loop migration."""
-        while True:
-            migration_running = self.scheduler._schedule_migration()
-            if not migration_running and not self.scheduler.has_migration_waiting():
-                await self.migration_event.wait()
-            elif migration_running:
-                self.migration_event.clear()
-                for msg in migration_running:
-                    migration_execution_requests: List[Tuple[int, List[Tuple[int, int]]]] = []
-                    migration_request = msg.migration_request
-                    prefill_block_ids = migration_request.remote_block_ids
-                    decode_block_ids = list(self.scheduler.block_manager.get_block_table(msg=msg))
+        # async with self.migration_main_lock:
+        migration_running = self.scheduler._schedule_migration()
+        if migration_running:
+            for msg in migration_running:
+                migration_execution_requests: List[Tuple[int, List[Tuple[int, int]]]] = []
+                migration_request = msg.migration_request
+                prefill_block_ids = migration_request.remote_block_ids
+                decode_block_ids = list(self.scheduler.block_manager.get_block_table(msg=msg))
 
-                    if not migration_request.is_dummy_prefill:
-                        assert len(prefill_block_ids) == len(decode_block_ids), (
-                            f'#prefill block ids ({len(prefill_block_ids)}) must equal to '
-                            f'#decode block ids ({len(decode_block_ids)})'
-                            f'all id length: {len(msg.num_token_ids)}')
-                        migration_execution_requests.append((
-                            migration_request.remote_engine_id,
-                            list(zip(prefill_block_ids, decode_block_ids)),
-                        ))
-                        migration_inputs = MigrationExecutionBatch(protocol=migration_request.protocol,
-                                                                   requests=migration_execution_requests)
-                        logger.info(f'migrating session: {msg.session_id} begin')
-                        await self.executor.migrate(migration_inputs)
-                        logger.info(f'migrating session: {msg.session_id} done')
-                        await self.engine_conn.zmq_send(remote_engine_id=migration_request.remote_engine_id,
-                                                        remote_session_id=migration_request.remote_session_id)
+                if not migration_request.is_dummy_prefill:
+                    assert len(prefill_block_ids) == len(decode_block_ids), (
+                        f'#prefill block ids ({len(prefill_block_ids)}) must equal to '
+                        f'#decode block ids ({len(decode_block_ids)})'
+                        f'all id length: {len(msg.num_token_ids)}')
+                    migration_execution_requests.append((
+                        migration_request.remote_engine_id,
+                        list(zip(prefill_block_ids, decode_block_ids)),
+                    ))
+                    migration_inputs = MigrationExecutionBatch(protocol=migration_request.protocol,
+                                                            requests=migration_execution_requests)
+                    logger.info(f'migrating session: {msg.session_id} begin')
+                    await self.executor.migrate(migration_inputs)
+                    logger.info(f'migrating session: {msg.session_id} done')
+                    await self.engine_conn.zmq_send(remote_engine_id=migration_request.remote_engine_id,
+                                                    remote_session_id=migration_request.remote_session_id)
 
-                # generate output
-                outputs: Dict[int, InferOutput] = dict()
-                self.scheduler.lock_running_migration(migration_running)
-                for _, msg in enumerate(migration_running):
-                    session_id = msg.session_id
-                    msg.resp.type = ResponseType.SUCCESS
-                    token_ids = [msg.migration_request.remote_token_id]
-                    new_token_timestamp = time.time()
-                    metrics_info = MetricsInfo(new_token_timestamp, msg.engine_core_events, self.scheduler.make_stats())
-                    out = InferOutput(
-                        session_id=session_id,
-                        resp=msg.resp,
-                        finish=False,
-                        token_ids=np.array(token_ids),
-                        metrics_info=metrics_info
-                    )
-                    outputs[session_id] = out
-                    self.update_running_migration([msg], np.array([token_ids]), [False], [None])
-                resp_que.put_nowait(outputs)
-                self.scheduler.unlock_running_migration(migration_running)
-                has_runable_event.set()
-            else:
-                # release coroutine for decoding
-                await asyncio.sleep(.5)
+            # generate output
+            outputs: Dict[int, InferOutput] = dict()
+            self.scheduler.lock_running_migration(migration_running)
+            for _, msg in enumerate(migration_running):
+                session_id = msg.session_id
+                msg.resp.type = ResponseType.SUCCESS
+                token_ids = [msg.migration_request.remote_token_id]
+                new_token_timestamp = time.time()
+                metrics_info = MetricsInfo(new_token_timestamp, msg.engine_core_events, self.scheduler.make_stats())
+                out = InferOutput(
+                    session_id=session_id,
+                    resp=msg.resp,
+                    finish=False,
+                    token_ids=np.array(token_ids),
+                    metrics_info=metrics_info
+                )
+                outputs[session_id] = out
+                self.update_running_migration([msg], np.array([token_ids]), [False], [None])
+            resp_que.put_nowait(outputs)
+            self.scheduler.unlock_running_migration(migration_running)
+            has_runnable_event.set()
+
 
     @torch.inference_mode()
     async def _async_loop_main(
@@ -1062,6 +1071,7 @@ class Engine:
         while True:
             if next_running is None:
                 await has_runable_event.wait()
+                await self.collect_migration_done(resp_que=resp_que, has_runnable_event=has_runable_event)
                 scheduler.collect_migration_done()
                 forward_inputs, next_running = await inputs_maker.send_next_inputs()
                 if next_running is None:
@@ -1085,9 +1095,10 @@ class Engine:
                     forward_event.clear()
 
                 # pre-forward before get last token
-                if idx == num_loops - 1:
-                    scheduler.collect_migration_done()
-                    forward_inputs, next_running = await inputs_maker.prefetch_next_inputs()
+                # if idx == num_loops - 1:
+                #     self.collect_migration_done(resp_que=resp_que)
+                #     scheduler.collect_migration_done()
+                #     forward_inputs, next_running = await inputs_maker.prefetch_next_inputs()
 
                 # send output
                 out = await self.executor.get_output_async()
@@ -1164,13 +1175,13 @@ class Engine:
             loop_main = asyncio.current_task()
             loop_tasks: List[asyncio.Task] = [loop_main, loop_msg_proc, loop_send_resp]
 
-            if self.engine_config.role != EngineRole.Hybrid:
-                logger.info('Starting async task MigrationLoop.')
-                loop_migration = event_loop.create_task(
-                    self._async_loop_migration(resp_que, has_runable_event=has_runable_event),
-                    name='MainLoopMigration',
-                )
-                loop_tasks.append(loop_migration)
+            # if self.engine_config.role != EngineRole.Hybrid:
+            #     logger.info('Starting async task MigrationLoop.')
+            #     loop_migration = event_loop.create_task(
+            #         self._async_loop_migration(resp_que, has_runable_event=has_runable_event),
+            #         name='MainLoopMigration',
+            #     )
+            #     loop_tasks.append(loop_migration)
 
             # binding done callback
             self._add_loop_tasks_done_callback(loop_tasks)

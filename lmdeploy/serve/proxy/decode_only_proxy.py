@@ -43,6 +43,8 @@ class Status(BaseModel):
     latency: Deque = Field(default=deque(maxlen=LATENCY_DEQUE_LEN), examples=[[]])
     speed: Optional[int] = Field(default=None, examples=[None])
     kvcache_usage: Optional[float] = 0
+    num_running: Optional[int] = 0
+    num_waiting: Optional[int] = 0
     total_token_nums: Optional[int] = 0
     history_itl: Deque[int] = deque(maxlen=history_itl_count)
 
@@ -126,24 +128,24 @@ class NodeManager:
         self.decode_index = 0
 
         # For KV Cache load balance strategies, default collect decode kv cache usage per 3 seconds
-        self.metric_collection_interval = 0.5
-        self.metric_endpoint = '/metrics/kvcache'
+        self.metric_collection_interval = 1
+        self.metric_endpoint = '/proxy/metrics'
         self.log_interval = 1
 
         print(f'routing_strategy: {self.routing_strategy}')
 
-        # 添加异步事件循环相关属性
-        self.kvcache_loop = None
-        self.kvcache_collector_task = None
-        self.kvcache_running = False
+        # # 添加异步事件循环相关属性
+        # self.metric_loop = None
+        # self.metric_collector_task = None
+        # self.metric_running = False
 
-        # 启动异步收集线程
-        self.kvcache_running = True
-        self.kvcache_collector_thread = threading.Thread(target=self._run_kvcache_collector, daemon=True)
-        self.kvcache_collector_thread.start()
+        # # 启动异步收集线程
+        # self.metric_running = True
+        # self.metric_collector_thread = threading.Thread(target=self._run_metric_collector, daemon=True)
+        # self.metric_collector_thread.start()
 
-        self.metric_logger_thread = threading.Thread(target=self._log_metrics_loop, daemon=True)
-        self.metric_logger_thread.start()
+        # self.metric_logger_thread = threading.Thread(target=self._log_metrics_loop, daemon=True)
+        # self.metric_logger_thread.start()
 
     def get_nodes(self, role: EngineRole) -> Dict:
         items = list(self.nodes.items())
@@ -161,39 +163,38 @@ class NodeManager:
     def decode_nodes(self):
         return self.get_nodes(EngineRole.Decode)
 
-    def _run_kvcache_collector(self):
-        """在新线程中运行异步事件循环."""
-        self.kvcache_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.kvcache_loop)
+    def _run_metric_collector(self):
+        """在新线程中运行异步事件循环，收集所有指标"""
+        self.metric_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.metric_loop)
 
-        # 创建后台任务
-        self.kvcache_collector_task = self.kvcache_loop.create_task(self._collect_kvcache_metrics_loop())
+        # 创建后台任务，重命名为更通用的指标收集任务
+        self.metric_collector_task = self.metric_loop.create_task(self._collect_metrics_loop())
 
         # 运行事件循环
-        self.kvcache_loop.run_forever()
+        self.metric_loop.run_forever()
 
         # 清理
-        if self.kvcache_collector_task:
-            self.kvcache_collector_task.cancel()
+        if self.metric_collector_task:
+            self.metric_collector_task.cancel()
             try:
-                self.kvcache_loop.run_until_complete(self.kvcache_collector_task)
+                self.metric_loop.run_until_complete(self.metric_collector_task)
             except asyncio.CancelledError:
                 pass
-        self.kvcache_loop.close()
+        self.metric_loop.close()
 
-    async def _collect_kvcache_metrics_loop(self):
-        """异步版本的指标收集循环."""
-        while self.kvcache_running:
-            await self._collect_kvcache_metrics()
+    async def _collect_metrics_loop(self):
+        """异步版本的指标收集循环，收集所有类型的指标"""
+        while self.metric_running:
+            await self._collect_metrics()
             await asyncio.sleep(self.metric_collection_interval)
 
-    async def _collect_kvcache_metrics(self):
-        """异步并行收集所有Decode节点的KV Cache指标."""
+    async def _collect_metrics(self):
+        """异步并行收集所有Decode节点的指标（包括kvcache_usage和num_running）"""
 
         async def fetch_node(session, node_url):
             try:
                 endpoint = f"{node_url.rstrip('/')}{self.metric_endpoint}"
-                # print(f"endpoint: {endpoint}")
                 async with session.get(endpoint, timeout=2) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -212,24 +213,24 @@ class NodeManager:
             tasks = [fetch_node(session, node_url) for node_url in decode_nodes]
             results = await asyncio.gather(*tasks, return_exceptions=False)
 
-            # print(f"results: {results}")
-
-            for node_url, usage in results:
-                if usage is not None:
-                    # print(f"usage: {usage}")
+            for node_url, metrics in results:
+                if metrics is not None:
                     status = self.nodes.get(node_url, Status())
-                    status.kvcache_usage = usage
+                    # 更新kvcache_usage和num_running两个指标
+                    status.kvcache_usage = metrics.get('kvcache_usage', 0)
+                    status.num_waiting = metrics.get('num_waiting', 0)
+                    status.num_running = metrics.get('num_running', 0)
                     self.nodes[node_url] = status
 
     def shutdown(self):
-        """关闭所有后台线程."""
-        # 停止KV Cache收集器
-        if self.kvcache_running:
-            self.kvcache_running = False
-            if self.kvcache_loop:
-                self.kvcache_loop.call_soon_threadsafe(self.kvcache_loop.stop)
-            if self.kvcache_collector_thread:
-                self.kvcache_collector_thread.join(timeout=1.0)
+        """关闭所有后台线程"""
+        # 停止指标收集器
+        if self.metric_running:
+            self.metric_running = False
+            if self.metric_loop:
+                self.metric_loop.call_soon_threadsafe(self.metric_loop.stop)
+            if self.metric_collector_thread:
+                self.metric_collector_thread.join(timeout=1.0)
 
     def _log_metrics_loop(self):
         """背景线程，定期收集指标并打印日志."""
@@ -237,10 +238,11 @@ class NodeManager:
             time.sleep(self.log_interval)
             self._log_metrics()
 
-    def _log_metrics(self, print_kv_cache: bool = True, print_batch_size: bool = True, print_avg_tpot: bool = True):
-        """打印节点指标日志（由参数控制输出内容）"""
+    def _log_metrics(self, print_kv_cache: bool = True, print_batch_size: bool = False, 
+                    print_avg_tpot: bool = False, print_num_running: bool = True, print_num_waiting: bool = True):
+        """打印节点指标日志（增加num_running指标的打印）"""
         # 若所有参数均为 False，则不打印任何内容
-        if not any([print_kv_cache, print_batch_size, print_avg_tpot]):
+        if not any([print_kv_cache, print_batch_size, print_avg_tpot, print_num_running]):
             return
 
         # 获取所有解码节点
@@ -264,17 +266,27 @@ class NodeManager:
             title_parts.append('Batch Size')
         if print_avg_tpot:
             title_parts.append('Avg TPOT')
+        if print_num_running:
+            title_parts.append('Running Requests')
 
         logger.info(f"=== {' & '.join(title_parts)} Metrics ===")
 
         # 遍历所有节点并输出指标
         for index, (node_url, status) in enumerate(decode_nodes.items(), start=1):
-            log_items = [f'Role: Decode, Node: Node {index}']
+            log_items = [f'Node: {index}']
 
             if print_kv_cache:
                 usage = status.kvcache_usage or 0
                 total_tokens = status.total_token_nums or 0
                 log_items.append(f'KV Cache Usage: {usage:.2f}, Total Tokens: {total_tokens}')
+
+            if print_num_running:
+                num_running = status.num_running or 0
+                log_items.append(f'Running Requests: {num_running}')
+
+            if print_num_waiting:
+                num_waiting = status.num_waiting or 0
+                log_items.append(f'Waiting Requests: {num_waiting}')
 
             if print_batch_size:
                 batch_size = status.unfinished or 0
@@ -623,6 +635,7 @@ class NodeManager:
         last_tokens = 0  # 记录该请求的token数
         last_completion_tokens = 0  # 记录该请求的completion_tokens数
         last_decode_time = None  # 记录上次Decode的时间
+        queueing_latency = 0
         try:
             request['stream_options'] = {'include_usage': True}  # 添加stream_options字段，用于统计Decode的KV Cache使用量
             async with aiohttp.ClientSession() as session:
@@ -661,6 +674,9 @@ class NodeManager:
                                         elif current_completion_tokens == 1:  # 第一个Decode token，初始化时间
                                             last_decode_time = time.time()
 
+                                    if 'usage' in data and 'queued_time' in data['usage']:
+                                        queueing_latency = data['usage']['queued_time']
+
                                 except json.JSONDecodeError:
                                     logger.warning(f'Failed to parse JSON: {line}')
 
@@ -678,6 +694,7 @@ class NodeManager:
                 with self.node_locks.get(node_url, threading.Lock()):
                     if node_url in self.nodes:
                         self.nodes[node_url].total_token_nums -= last_tokens
+            print(f"queueing_latency: {queueing_latency:.4f} s")
 
     async def generate(self, request: Dict, node_url: str, endpoint: str):
         """Return a the response of the input request.
@@ -935,7 +952,7 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
             node_manager.post_call(p_url, start)
 
         # # Decode
-        d_url = node_manager.get_node_url(request.model, EngineRole.Decode)
+        d_url = node_manager.get_node_url(request.model, EngineRole.Decode, len(request.input_ids))
         if not d_url:
             return node_manager.handle_unavailable_model(request.model)
         logger.info(f'A Decode request is dispatched to {d_url}')
@@ -1068,7 +1085,7 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
 
         # Decode
         try:
-            d_url = node_manager.get_node_url(request.model, EngineRole.Decode)
+            d_url = node_manager.get_node_url(request.model, EngineRole.Decode, len(request.input_ids))
         except Exception as e:
             logger.error(f'error Msg: {str(e)}')
             return {'status': 'Instance sch error, cannot find available p_url'}

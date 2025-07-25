@@ -113,13 +113,9 @@ def available_models():
         model_cards.append(ModelCard(id=model_name, root=model_name, permission=[ModelPermission()]))
     return ModelList(data=model_cards)
 
-@router.get('/metrics/kvcache', dependencies=[Depends(check_api_key)])
-def get_kvcache_usage():
-    return VariableInterface.async_engine.get_kv_cache_usage()
-
-@router.get('/metrics/numrunning', dependencies=[Depends(check_api_key)])
-def get_kvcache_usage():
-    return VariableInterface.async_engine.get_batch_size()
+@router.get('/proxy/metrics', dependencies=[Depends(check_api_key)])
+def get_metrics():
+    return VariableInterface.async_engine.get_metrics()
 
 def create_error_response(status: HTTPStatus, message: str, error_type='invalid_request_error'):
     """Create error response according to http status and message.
@@ -771,6 +767,7 @@ async def completions_v1(raw_request: Request = None):
                         prompt_tokens=final_res.input_token_len,
                         completion_tokens=final_res.generate_token_len,
                         total_tokens=total_tokens,
+                        queued_time=final_res.queued_time,
                     )
                 response_json = create_stream_response_json(index=0,
                                                             text=res.response,
