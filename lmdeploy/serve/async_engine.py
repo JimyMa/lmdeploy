@@ -785,7 +785,7 @@ class AsyncEngine(LogitsMixin):
                 hit_stop_token = 0
                 req_state = RequestState(prompt_len=input_len)  # per-requst state
                 async for outputs in gen:
-                    logger.error(f"output: {outputs}")
+                    # logger.error(f"output: {outputs}")
                     
                     if queued_ts == 0.0 or scheduled_ts == 0.0:
                         from lmdeploy.messages import EngineCoreEventType
