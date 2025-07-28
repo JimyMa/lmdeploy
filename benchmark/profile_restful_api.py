@@ -400,9 +400,13 @@ class BenchmarkMetrics:
     std_ttft_ms: float
     p99_ttft_ms: float
     mean_tpot_ms: float
+    mean_tpot_wo_queue_ms: float
     median_tpot_ms: float
+    median_tpot_wo_queue_ms: float
     std_tpot_ms: float
+    std_tpot_wo_queue_ms: float
     p99_tpot_ms: float
+    p99_tpot_wo_queue_ms: float
     mean_itl_ms: float
     median_itl_ms: float
     std_itl_ms: float
@@ -615,11 +619,11 @@ def calculate_metrics(
     completed = 0
     itls: List[float] = []
     tpots: List[float] = []
+    tpots_wo_queue: List[float] = []
     ttfts: List[float] = []
     e2e_latencies: List[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
-            # print(f"outputs[{i}].itl: {outputs[i].itl}",flush=True)
             output_len = outputs[i].output_len
             output_lens.append(output_len)
             retokenized_output_len = len(tokenizer.encode(outputs[i].generated_text, add_special_tokens=False))
@@ -628,11 +632,15 @@ def calculate_metrics(
             if output_len > 1:
                 tpots.append((outputs[i].latency - outputs[i].ttft) / (output_len - 1))
                 # tpots.append((outputs[i].latency / output_len))
+                
+                # 减去排队时间计算tpot_wo_queue
+                effective_latency = outputs[i].latency - outputs[i].queueing_latency
+                tpot_wo_queue = (effective_latency - outputs[i].ttft) / (output_len - 1)
+                tpots_wo_queue.append(tpot_wo_queue)
+
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
-
             e2e_latencies.append(outputs[i].latency)
-
             completed += 1
         else:
             output_lens.append(0)
@@ -658,9 +666,13 @@ def calculate_metrics(
         std_ttft_ms=np.std(ttfts or 0) * 1000,
         p99_ttft_ms=np.percentile(ttfts or 0, 99) * 1000,
         mean_tpot_ms=np.mean(tpots or 0) * 1000,
+        mean_tpot_wo_queue_ms=np.mean(tpots_wo_queue or 0) * 1000,
         median_tpot_ms=np.median(tpots or 0) * 1000,
+        median_tpot_wo_queue_ms=np.median(tpots_wo_queue or 0) * 1000,
         std_tpot_ms=np.std(tpots or 0) * 1000,
+        std_tpot_wo_queue_ms=np.std(tpots_wo_queue or 0) * 1000,
         p99_tpot_ms=np.percentile(tpots or 0, 99) * 1000,
+        p99_tpot_wo_queue_ms=np.percentile(tpots_wo_queue or 0, 99) * 1000,
         mean_itl_ms=np.mean(itls or 0) * 1000,
         median_itl_ms=np.median(itls or 0) * 1000,
         std_itl_ms=np.std(itls or 0) * 1000,
@@ -771,6 +783,10 @@ async def benchmark(
     print('{:<40} {:<10.2f}'.format('Mean TPOT (ms):', metrics.mean_tpot_ms))
     print('{:<40} {:<10.2f}'.format('Median TPOT (ms):', metrics.median_tpot_ms))
     print('{:<40} {:<10.2f}'.format('P99 TPOT (ms):', metrics.p99_tpot_ms))
+    print('{s:{c}^{n}}'.format(s='Time per Output Token (wo queue_latency)', n=50, c='-'))
+    print('{:<40} {:<10.2f}'.format('Mean TPOT (ms):', metrics.mean_tpot_wo_queue_ms))
+    print('{:<40} {:<10.2f}'.format('Median TPOT (ms):', metrics.median_tpot_wo_queue_ms))
+    print('{:<40} {:<10.2f}'.format('P99 TPOT (ms):', metrics.p99_tpot_wo_queue_ms))
     print('{s:{c}^{n}}'.format(s='Inter-token Latency', n=50, c='-'))
     print('{:<40} {:<10.2f}'.format('Mean ITL (ms):', metrics.mean_itl_ms))
     print('{:<40} {:<10.2f}'.format('Median ITL (ms):', metrics.median_itl_ms))
@@ -783,7 +799,7 @@ async def benchmark(
             'backend', 'dataset_name', 'sharegpt_output_len', 'random_input_len', 'random_output_len',
             'random_range_ratio', 'request_rate', 'completed', 'total_input_tokens', 'total_output_tokens', 'duration',
             'request_throughput', 'input_throughput', 'output_throughput', 'mean_e2e_latency_ms', 'mean_ttft_ms',
-            'mean_tpot_ms', 'mean_itl_ms'
+            'mean_tpot_ms', 'mean_tpot_wo_queue_ms', 'mean_itl_ms'
         ]
         result = {
             'backend': args.backend,
@@ -803,6 +819,7 @@ async def benchmark(
             'input_throughput': metrics.input_throughput,
             'mean_ttft_ms': metrics.mean_ttft_ms,
             'mean_tpot_ms': metrics.mean_tpot_ms,
+            'mean_tpot_wo_queue_ms': metrics.mean_tpot_wo_queue_ms,
             'mean_itl_ms': metrics.mean_itl_ms,
         }
     else:
@@ -841,9 +858,13 @@ async def benchmark(
         'std_ttft_ms': metrics.std_ttft_ms,
         'p99_ttft_ms': metrics.p99_ttft_ms,
         'mean_tpot_ms': metrics.mean_tpot_ms,
+        'mean_tpot_wo_queue_ms': metrics.mean_tpot_wo_queue_ms,
         'median_tpot_ms': metrics.median_tpot_ms,
+        'median_tpot_wo_queue_ms': metrics.median_tpot_wo_queue_ms,
         'std_tpot_ms': metrics.std_tpot_ms,
+        'std_tpot_wo_queue_ms': metrics.std_tpot_wo_queue_ms,
         'p99_tpot_ms': metrics.p99_tpot_ms,
+        'p99_tpot_wo_queue_ms': metrics.p99_tpot_wo_queue_ms,
         'mean_itl_ms': metrics.mean_itl_ms,
         'median_itl_ms': metrics.median_itl_ms,
         'std_itl_ms': metrics.std_itl_ms,
@@ -879,7 +900,7 @@ def save_request_details(request_ids: List[int], outputs: List[RequestFuncOutput
     
     # 定义CSV字段
     fieldnames = [
-        'request_id', 'prompt_len', 'output_len', 'queueing_latency', 'tpot',
+        'request_id', 'prompt_len', 'output_len', 'queueing_latency', 'tpot', 'tpot_wo_queue',
         'itl', 'itl_new_token_index', 'itl_total_token_index',
         'success', 'error'
     ]
@@ -901,6 +922,7 @@ def save_request_details(request_ids: List[int], outputs: List[RequestFuncOutput
                 'output_len': output.output_len,
                 'queueing_latency': f'{output.queueing_latency:.6f}',
                 'tpot': f'{(output.latency - output.ttft) / (output.output_len - 1):.6f}',
+                'tpot_wo_queue': f'{(output.latency - output.ttft - output.queueing_latency) / (output.output_len - 1):.6f}',
                 'itl': itl_str,
                 'itl_new_token_index': new_idx_str,
                 'itl_total_token_index': total_idx_str,
