@@ -769,7 +769,8 @@ async def completions_v1(raw_request: Request = None):
                         completion_tokens=final_res.generate_token_len,
                         total_tokens=total_tokens,
                         queued_time=final_res.queued_time,
-                        preprocess_before_queue=final_res.preprocess_before_queue
+                        preprocess_before_queue=final_res.preprocess_before_queue,
+                        inference_time=final_res.inference_time,
                     )
                 response_json = create_stream_response_json(index=0,
                                                             text=res.response,

@@ -68,6 +68,7 @@ class RequestFuncOutput:
     itl_total_token_index: List[int] = field(default_factory=list)
     itl_new_token_index: List[int] = field(default_factory=list)
     queueing_latency: float = 0.0
+    server_inference_time: float = 0.0
     preprocess_before_queue: float = 0.0
     prompt_len: int = 0
     error: str = ''
@@ -247,6 +248,9 @@ async def async_request_openai_completions(
                                         output.itl_new_token_index.append(data['usage']['completion_tokens']-last_token_idx)
                                         output.itl_total_token_index.append(data['usage']['total_tokens'])
                                         last_token_idx = data['usage']['completion_tokens']
+
+                            if data['usage'] and data['usage']['inference_time']:
+                                output.server_inference_time = data['usage']['inference_time']
 
                     output.generated_text = generated_text
                     output.success = True
@@ -902,8 +906,8 @@ def save_request_details(request_ids: List[int], outputs: List[RequestFuncOutput
     
     # 定义CSV字段
     fieldnames = [
-        'request_id', 'prompt_len', 'output_len', 'preprocess_before_queue', 'queueing_latency', 'tpot', 'tpot_wo_queue',
-        'itl', 'itl_new_token_index', 'itl_total_token_index',
+        'request_id', 'prompt_len', 'output_len', 'server_inference_tpot', 'queueing_latency', 'tpot', 'tpot_wo_queue',
+        'itl', 'itl_new_token_index', 'itl_total_token_index', 'preprocess_before_queue',
         'success', 'error'
     ]
     
@@ -923,12 +927,13 @@ def save_request_details(request_ids: List[int], outputs: List[RequestFuncOutput
                 'prompt_len': output.prompt_len,
                 'output_len': output.output_len,
                 'queueing_latency': f'{output.queueing_latency:.6f}',
-                'preprocess_before_queue': f'{output.preprocess_before_queue:.6f}',
+                'server_inference_tpot': f'{output.server_inference_time / (output.output_len - 1):.6f}',
                 'tpot': f'{(output.latency - output.ttft) / (output.output_len - 1):.6f}',
                 'tpot_wo_queue': f'{(output.latency - output.ttft - output.queueing_latency) / (output.output_len - 1):.6f}',
                 'itl': itl_str,
                 'itl_new_token_index': new_idx_str,
                 'itl_total_token_index': total_idx_str,
+                'preprocess_before_queue': f'{output.preprocess_before_queue:.6f}',
                 'success': output.success,
                 'error': output.error[:500]  # 限制错误信息长度
             })

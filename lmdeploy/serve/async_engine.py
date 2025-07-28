@@ -5,6 +5,7 @@ import atexit
 import concurrent.futures
 import dataclasses
 import os
+import time
 import random
 from contextlib import asynccontextmanager, closing
 from copy import deepcopy
@@ -64,6 +65,7 @@ class GenOut:
     last_hidden_state: Any = None
     queued_time: float = None
     preprocess_before_queue: float = None
+    inference_time: float = None
 
     # for disaggregation
     cache_block_ids: List[int] = None
@@ -787,6 +789,10 @@ class AsyncEngine(LogitsMixin):
                 prev_len = 0
                 hit_stop_token = 0
                 req_state = RequestState(prompt_len=input_len)  # per-requst state
+                # Inference interval is from first SCHEDULED to last NEW_TOKEN
+                # Any preemptions during prefill or decode are included
+                # req_stats.last_token_ts - req_stats.scheduled_ts
+                inference_time = 0.0
                 async for outputs in gen:
                     # logger.error(f"output: {outputs}")
                     
@@ -844,7 +850,8 @@ class AsyncEngine(LogitsMixin):
                                  token_ids=res,
                                  cache_block_ids=outputs.cache_block_ids,
                                  queued_time=queued_time,
-                                 preprocess_before_queue=preprocess_before_queue)
+                                 preprocess_before_queue=preprocess_before_queue,
+                                 inference_time=None)
 
                     if outputs.logprobs is not None:
                         log_offset = ids_offset - start_ids_offset
@@ -872,6 +879,9 @@ class AsyncEngine(LogitsMixin):
                     logger.info(f'session {session_id} finished, reason '
                                 f'"{finish_reason}", input_tokens '
                                 f'{len(input_ids)}, output_tokens {gen_len}')
+                    
+                    inference_time = req_state.stats.last_token_ts - req_state.stats.scheduled_ts
+
                     yield GenOut(response,
                                  self.id2step[session_id],
                                  len(input_ids),
@@ -880,7 +890,8 @@ class AsyncEngine(LogitsMixin):
                                  token_ids=[],
                                  cache_block_ids=outputs.cache_block_ids,
                                  queued_time=queued_time,
-                                 preprocess_before_queue=preprocess_before_queue)
+                                 preprocess_before_queue=preprocess_before_queue,
+                                 inference_time=inference_time)
                 else:
                     logger.error(f'session {session_id} finished, '
                                  'reason "error"')
