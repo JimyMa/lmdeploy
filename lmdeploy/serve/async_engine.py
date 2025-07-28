@@ -63,6 +63,7 @@ class GenOut:
     logits: Any = None
     last_hidden_state: Any = None
     queued_time: float = None
+    preprocess_before_queue: float = None
 
     # for disaggregation
     cache_block_ids: List[int] = None
@@ -662,6 +663,7 @@ class AsyncEngine(LogitsMixin):
         rewind_stop_tokens: bool = False,
         input_ids: Optional[List] = None,
         enable_thinking: Optional[bool] = None,
+        arrive_time: Optional[float] = None,
         **kwargs,
     ):
         """Generate responses.
@@ -778,7 +780,8 @@ class AsyncEngine(LogitsMixin):
                                      stream_output=stream_response,
                                      sequence_start=sequence_start,
                                      sequence_end=sequence_end,
-                                     step=history_len) as gen:
+                                     step=history_len,
+                                     arrive_time=arrive_time) as gen:
                 queued_ts = 0.0
                 scheduled_ts = 0.0
                 prev_len = 0
@@ -831,6 +834,7 @@ class AsyncEngine(LogitsMixin):
 
                     # queued_time = req_state.stats.scheduled_ts - req_state.stats.queued_ts
                     queued_time = scheduled_ts - queued_ts
+                    preprocess_before_queue = queued_ts - arrive_time
 
                     out = GenOut(response,
                                  history_len,
@@ -839,7 +843,8 @@ class AsyncEngine(LogitsMixin):
                                  finish_reason,
                                  token_ids=res,
                                  cache_block_ids=outputs.cache_block_ids,
-                                 queued_time=queued_time)
+                                 queued_time=queued_time,
+                                 preprocess_before_queue=preprocess_before_queue)
 
                     if outputs.logprobs is not None:
                         log_offset = ids_offset - start_ids_offset
@@ -874,7 +879,8 @@ class AsyncEngine(LogitsMixin):
                                  finish_reason,
                                  token_ids=[],
                                  cache_block_ids=outputs.cache_block_ids,
-                                 queued_time=queued_time)
+                                 queued_time=queued_time,
+                                 preprocess_before_queue=preprocess_before_queue)
                 else:
                     logger.error(f'session {session_id} finished, '
                                  'reason "error"')

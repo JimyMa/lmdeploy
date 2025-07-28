@@ -56,6 +56,7 @@ class UsageInfo(BaseModel):
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
     queued_time: Optional[float] = None
+    preprocess_before_queue: Optional[float] = None
 
 
 class Function(BaseModel):

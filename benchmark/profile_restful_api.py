@@ -68,6 +68,7 @@ class RequestFuncOutput:
     itl_total_token_index: List[int] = field(default_factory=list)
     itl_new_token_index: List[int] = field(default_factory=list)
     queueing_latency: float = 0.0
+    preprocess_before_queue: float = 0.0
     prompt_len: int = 0
     error: str = ''
     output_len: int = 0
@@ -224,6 +225,7 @@ async def async_request_openai_completions(
                                 ttft = time.perf_counter() - st
                                 output.ttft = 0
                                 output.queueing_latency = data['usage']['queued_time']
+                                output.preprocess_before_queue = data['usage']['preprocess_before_queue']
                                 output.itl.append(ttft)
                                 itl.append(ttft)
                                 most_recent_timestamp = timestamp
@@ -900,7 +902,7 @@ def save_request_details(request_ids: List[int], outputs: List[RequestFuncOutput
     
     # 定义CSV字段
     fieldnames = [
-        'request_id', 'prompt_len', 'output_len', 'queueing_latency', 'tpot', 'tpot_wo_queue',
+        'request_id', 'prompt_len', 'output_len', 'preprocess_before_queue', 'queueing_latency', 'tpot', 'tpot_wo_queue',
         'itl', 'itl_new_token_index', 'itl_total_token_index',
         'success', 'error'
     ]
@@ -921,6 +923,7 @@ def save_request_details(request_ids: List[int], outputs: List[RequestFuncOutput
                 'prompt_len': output.prompt_len,
                 'output_len': output.output_len,
                 'queueing_latency': f'{output.queueing_latency:.6f}',
+                'preprocess_before_queue': f'{output.preprocess_before_queue:.6f}',
                 'tpot': f'{(output.latency - output.ttft) / (output.output_len - 1):.6f}',
                 'tpot_wo_queue': f'{(output.latency - output.ttft - output.queueing_latency) / (output.output_len - 1):.6f}',
                 'itl': itl_str,

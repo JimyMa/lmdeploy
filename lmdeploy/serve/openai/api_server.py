@@ -723,7 +723,8 @@ async def completions_v1(raw_request: Request = None):
             sequence_end=True,
             do_preprocess=False,
             adapter_name=adapter_name,
-            input_ids=request.input_ids[i] if request.input_ids is not None else None)
+            input_ids=request.input_ids[i] if request.input_ids is not None else None,
+            arrive_time=time.perf_counter())
         generators.append(result_generator)
 
     def create_stream_response_json(index: int,
@@ -768,6 +769,7 @@ async def completions_v1(raw_request: Request = None):
                         completion_tokens=final_res.generate_token_len,
                         total_tokens=total_tokens,
                         queued_time=final_res.queued_time,
+                        preprocess_before_queue=final_res.preprocess_before_queue
                     )
                 response_json = create_stream_response_json(index=0,
                                                             text=res.response,
