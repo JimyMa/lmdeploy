@@ -16,10 +16,13 @@ import aiohttp
 import numpy as np
 import requests
 import uvicorn
+import logging
+import sys
 from fastapi import BackgroundTasks, Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from datetime import datetime
 
 from lmdeploy.pytorch.disagg.config import DistServeRDMAConfig, EngineRole, RDMALinkType, ServingStrategy
 from lmdeploy.pytorch.disagg.conn.protocol import MigrationProtocol, MigrationRequest
@@ -29,9 +32,35 @@ from lmdeploy.serve.openai.api_server import check_api_key, create_error_respons
 from lmdeploy.serve.openai.protocol import ModelCard  # noqa: E501
 from lmdeploy.serve.openai.protocol import ChatCompletionRequest, CompletionRequest, ModelList, ModelPermission
 from lmdeploy.serve.proxy.constants import AIOHTTP_TIMEOUT, LATENCY_DEQUE_LEN, ErrorCodes, RoutingStrategy, err_msg
-from lmdeploy.utils import get_logger
 
-logger = get_logger('lmdeploy')
+log_folder = "/nvme2/share/chenjiefei/scripts/proxy_log/"
+
+if not os.path.exists(log_folder):
+    os.makedirs(log_folder, exist_ok=True)
+
+# 获取包含详细时间的时间戳（年-月-日-时-分-秒）
+current_datetime = datetime.now().strftime("%Y%m%d_%H%M%S")
+# 定义包含详细时间的日志文件名
+log_filename = os.path.join(log_folder, f"proxy_res_{current_datetime}.log")
+
+print(f"日志文件将保存到: {log_filename}")
+
+logger = logging.getLogger('proxy')
+logger.setLevel(logging.INFO)
+
+if logger.handlers:
+    logger.handlers.clear()
+
+file_handler = logging.FileHandler(log_filename, encoding='utf-8')
+formatter = logging.Formatter('%(asctime)s - %(message)s',
+                              datefmt='%Y-%m-%d %H:%M:%S')
+file_handler.setFormatter(formatter)
+
+logger.addHandler(file_handler)
+
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
 
 history_itl_count = 500
 
@@ -134,18 +163,18 @@ class NodeManager:
 
         print(f'routing_strategy: {self.routing_strategy}')
 
-        # # 添加异步事件循环相关属性
-        # self.metric_loop = None
-        # self.metric_collector_task = None
-        # self.metric_running = False
+        # 添加异步事件循环相关属性
+        self.metric_loop = None
+        self.metric_collector_task = None
+        self.metric_running = False
 
-        # # 启动异步收集线程
-        # self.metric_running = True
-        # self.metric_collector_thread = threading.Thread(target=self._run_metric_collector, daemon=True)
-        # self.metric_collector_thread.start()
+        # 启动异步收集线程
+        self.metric_running = True
+        self.metric_collector_thread = threading.Thread(target=self._run_metric_collector, daemon=True)
+        self.metric_collector_thread.start()
 
-        # self.metric_logger_thread = threading.Thread(target=self._log_metrics_loop, daemon=True)
-        # self.metric_logger_thread.start()
+        self.metric_logger_thread = threading.Thread(target=self._log_metrics_loop, daemon=True)
+        self.metric_logger_thread.start()
 
     def get_nodes(self, role: EngineRole) -> Dict:
         items = list(self.nodes.items())
