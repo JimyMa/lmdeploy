@@ -831,18 +831,18 @@ class AsyncEngine(LogitsMixin):
                     prev_len = output_len
 
                     ids_offset = state.ids_offset
-                    response, state = self.tokenizer.detokenize_incrementally(
-                        token_ids,
-                        state,
-                        skip_special_tokens=gen_config.skip_special_tokens,
-                        spaces_between_special_tokens=gen_config.spaces_between_special_tokens)
+                    # response, state = self.tokenizer.detokenize_incrementally(
+                    #     token_ids,
+                    #     state,
+                    #     skip_special_tokens=gen_config.skip_special_tokens,
+                    #     spaces_between_special_tokens=gen_config.spaces_between_special_tokens)
                     res = token_ids[ids_offset:]
 
                     # queued_time = req_state.stats.scheduled_ts - req_state.stats.queued_ts
                     queued_time = scheduled_ts - queued_ts
                     preprocess_before_queue = queued_ts - arrive_time
 
-                    out = GenOut(response,
+                    out = GenOut("dummy",
                                  history_len,
                                  input_len,
                                  gen_len,
