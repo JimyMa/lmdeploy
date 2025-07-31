@@ -533,61 +533,71 @@ def sample_random_requests(
     dataset_path: str,
 ) -> List[Tuple[str, int, int]]:
 
-    input_lens = np.random.randint(
-        max(int(input_len * range_ratio), 1),
-        input_len + 1,
-        size=num_prompts,
-    )
-    output_lens = np.random.randint(
-        int(output_len * range_ratio),
-        output_len + 1,
-        size=num_prompts,
-    )
+    # input_lens = np.random.randint(
+    #     max(int(input_len * range_ratio), 1),
+    #     input_len + 1,
+    #     size=num_prompts,
+    # )
+    
+    # output_lens = np.random.randint(
+    #     int(output_len * range_ratio),
+    #     output_len + 1,
+    #     size=num_prompts,
+    # )
 
-    if True:
-        # Sample token ids from ShareGPT and repeat/truncate them to
-        # satisfy the input_lens
+    # if True:
+    #     # Sample token ids from ShareGPT and repeat/truncate them to
+    #     # satisfy the input_lens
 
-        # Download sharegpt if necessary
-        if not os.path.isfile(dataset_path):
-            dataset_path = download_and_cache_file(SHAREGPT_URL)
+    #     # Download sharegpt if necessary
+    #     if not os.path.isfile(dataset_path):
+    #         dataset_path = download_and_cache_file(SHAREGPT_URL)
 
-        # Load the dataset.
-        with open(dataset_path) as f:
-            dataset = json.load(f)
-        # Filter out the conversations with less than 2 turns.
-        dataset = [data for data in dataset if len(data['conversations']) >= 2]
-        # Only keep the first two turns of each conversation.
-        dataset = [(data['conversations'][0]['value'], data['conversations'][1]['value']) for data in dataset]
-        # remove the empty prompt
-        dataset = [(query, answer) for query, answer in dataset if len(query) > 0]
+    #     # Load the dataset.
+    #     with open(dataset_path) as f:
+    #         dataset = json.load(f)
+    #     # Filter out the conversations with less than 2 turns.
+    #     dataset = [data for data in dataset if len(data['conversations']) >= 2]
+    #     # Only keep the first two turns of each conversation.
+    #     dataset = [(data['conversations'][0]['value'], data['conversations'][1]['value']) for data in dataset]
+    #     # remove the empty prompt
+    #     dataset = [(query, answer) for query, answer in dataset if len(query) > 0]
 
-        # Shuffle the dataset.
-        random.shuffle(dataset)
+    #     # Shuffle the dataset.
+    #     random.shuffle(dataset)
 
-        # Filter out sequences that are too long or too short
-        input_requests: List[Tuple[str, int, int]] = []
-        for i in range(num_prompts):
-            # Tokenize the prompts and completions.
-            prompt = dataset[i][0]
-            prompt_token_ids = tokenizer.encode(prompt)
-            prompt_len = len(prompt_token_ids)
+    #     # Filter out sequences that are too long or too short
+    #     input_requests: List[Tuple[str, int, int]] = []
+    #     for i in range(num_prompts):
+    #         # Tokenize the prompts and completions.
+    #         prompt = dataset[i][0]
+    #         prompt_token_ids = tokenizer.encode(prompt)
+    #         prompt_len = len(prompt_token_ids)
 
-            if prompt_len > input_lens[i]:
-                input_ids = prompt_token_ids[:input_lens[i]]
-            else:
-                ratio = (input_lens[i] + prompt_len - 1) // prompt_len
-                input_ids = (prompt_token_ids * ratio)[:input_lens[i]]
-            prompt = tokenizer.decode(input_ids)
-            input_requests.append((prompt, int(input_lens[i]), int(output_lens[i])))
-    else:
-        # Sample token ids from random integers.
-        # This can cause some NaN issues.
-        offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
-        input_requests = []
-        for i in range(num_prompts):
-            prompt = tokenizer.decode([(offsets[i] + i + j) % tokenizer.vocab_size for j in range(input_lens[i])])
-            input_requests.append((prompt, int(input_lens[i]), int(output_lens[i])))
+    #         if prompt_len > input_lens[i]:
+    #             input_ids = prompt_token_ids[:input_lens[i]]
+    #         else:
+    #             ratio = (input_lens[i] + prompt_len - 1) // prompt_len
+    #             input_ids = (prompt_token_ids * ratio)[:input_lens[i]]
+    #         prompt = tokenizer.decode(input_ids)
+    #         input_requests.append((prompt, int(input_lens[i]), int(output_lens[i])))
+    # else:
+    #     # Sample token ids from random integers.
+    #     # This can cause some NaN issues.
+    #     offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
+    #     input_requests = []
+    #     for i in range(num_prompts):
+    #         prompt = tokenizer.decode([(offsets[i] + i + j) % tokenizer.vocab_size for j in range(input_lens[i])])
+    #         input_requests.append((prompt, int(input_lens[i]), int(output_lens[i])))
+    
+    # 生成固定长度的input_lens：num_prompts个input_len
+    input_lens = [input_len] * num_prompts
+    
+    # 生成固定长度的output_lens：num_prompts个output_len
+    output_lens = [output_len] * num_prompts
+    
+    # 生成请求列表，所有prompt都为空字符串
+    input_requests = [("", input_len, output_len) for _ in range(num_prompts)]
 
     print(f'#Input tokens: {np.sum(input_lens)}')
     print(f'#Output tokens: {np.sum(output_lens)}')
@@ -1058,11 +1068,11 @@ def run_benchmark(args_: argparse.Namespace):
     elif args.dataset_name == 'unbalance':
         input_requests = sample_unbalance_requests(
             small_input_len=1024,
-            small_output_len=128,
+            small_output_len=400,
             long_input_len=320000,
-            long_output_len=128,
-            num_prompts=10000,
-            long_ratio=0.05,
+            long_output_len=100,
+            num_prompts=args.num_prompts,
+            long_ratio=0.002,
         )
     else:
         raise ValueError(f'Unknown dataset: {args.dataset_name}')
@@ -1135,7 +1145,7 @@ if __name__ == '__main__':
         '--dataset-name',
         type=str,
         default='sharegpt',
-        choices=['sharegpt', 'random'],
+        choices=['sharegpt', 'random', 'unbalance'],
         help='Name of the dataset to benchmark on.',
     )
     parser.add_argument('--dataset-path', type=str, default='', help='Path to the dataset.')
