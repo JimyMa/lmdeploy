@@ -69,6 +69,12 @@ class Scheduler:
         """Get waiting sequence."""
         seq_map = self.seq_manager.get_sequences(MessageStatus.STOPPED)
         return list(seq_map.values())
+    
+    @property
+    def aborted(self):
+        """Get aborted sequence."""
+        seq_map = self.seq_manager.get_sequences(MessageStatus.ABORTED)
+        return list(seq_map.values())
 
     @property
     def locked(self):
@@ -174,23 +180,26 @@ class Scheduler:
         waiting_migration = _reorder_migrating()
 
         max_batches = self.scheduler_config.max_batches - self.num_running() - self.num_locked()
+
         while len(waiting_migration) > 0 and len(running_migration) < max_batches:
 
             seq = waiting_migration[0]
-            if self.block_manager.can_allocate(seq,seq.sampling_param.max_new_tokens):
-                seq = waiting_migration.pop(0)
-                self.block_trie.match(waiting_migration)
-                if not __evict_for_seq(seq, waiting_migration, seq.sampling_param.max_new_tokens):
-                    break
-
-                # allocate session memory
-                self.block_manager.allocate(seq,seq.sampling_param.max_new_tokens)
-                _to_running(seq)
-
-                seq.record_event(EngineCoreEventType.SCHEDULED)
-
-            else:
+            self.block_trie.match(waiting_migration)
+            if not __evict_for_seq(seq, waiting_migration, seq.sampling_param.max_new_tokens):
                 break
+            
+            seq = waiting_migration.pop(0)
+
+            # allocate session memory
+            self.block_manager.allocate(seq,seq.sampling_param.max_new_tokens)
+            _to_running(seq)
+            
+            # if not self.block_manager.can_allocate(seq,seq.sampling_param.max_new_tokens):
+            #     if not self.running and not self.num_migration_running() and not self.num_migration_locked() and not self.num_migration_done() and not self.waiting and not self.locked:
+            #         logger.error("memory leak happend")
+            #         print(f'_schedule_migration running == 0 : free gpu cache blocks: {self.block_manager.get_num_free_gpu_blocks()}, total gpu cache blocks: {self.block_manager.num_gpu_blocks}')
+            #         print(f"_schedule_migration running == 0 : locked: {self.num_locked()}, waiting: {self.num_waiting()}, num_to_be_migrated: {self.num_to_be_migrated()}, num_migration_waiting: {self.num_migration_waiting()}, num_migration_running: {self.num_migration_running()}, num_migration_locked: {self.num_migration_locked()}, num_migration_done: {self.num_migration_done()}, num_hang: {len(self.hanging)}, num_abort: {len(self.aborted)}")
+            #     break
 
         return running_migration
 
@@ -254,6 +263,10 @@ class Scheduler:
         """Schedule decoding."""
 
         running = self.running
+
+        # if len(running) == 0:
+        #     print(f'_schedule_decoding running == 0 : free gpu cache blocks: {self.block_manager.get_num_free_gpu_blocks()}, total gpu cache blocks: {self.block_manager.num_gpu_blocks}')
+        #     print(f"_schedule_decoding running == 0 : locked: {self.num_locked()}, waiting: {self.num_waiting()}, num_to_be_migrated: {self.num_to_be_migrated()}, num_migration_waiting: {self.num_migration_waiting()}, num_migration_running: {self.num_migration_running()}, num_migration_locked: {self.num_migration_locked()}, num_migration_done: {self.num_migration_done()}, num_hang: {len(self.hanging)}")
         assert len(running) != 0
 
         eviction_helper = self.eviction_helper
@@ -281,10 +294,6 @@ class Scheduler:
                 self._set_message_status(seq, MessageStatus.ABORTED)
                 self.block_manager.free(seq)
                 seq.set_step(0)
-                continue
-
-            if not __evict_for_seq(seq, seq.sampling_param.max_new_tokens):
-                self._set_message_status(seq, MessageStatus.WAITING)
                 continue
 
             # self.block_manager.allocate(seq, prealloc_size)
@@ -330,6 +339,7 @@ class Scheduler:
             seq (SchedulerSequence): sequence to remove
         """
         self.block_manager.free(seq)
+        # logger.error(f'_remove_sequence func: free gpu cache blocks: {self.block_manager.get_num_free_gpu_blocks()}, total gpu cache blocks: {self.block_manager.num_gpu_blocks}')
         seq.set_step(0)
         seq.session.remove_sequence(seq)
 
