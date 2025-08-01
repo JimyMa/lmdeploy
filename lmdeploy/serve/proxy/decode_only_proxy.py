@@ -33,7 +33,9 @@ from lmdeploy.serve.openai.protocol import ModelCard  # noqa: E501
 from lmdeploy.serve.openai.protocol import ChatCompletionRequest, CompletionRequest, ModelList, ModelPermission
 from lmdeploy.serve.proxy.constants import AIOHTTP_TIMEOUT, LATENCY_DEQUE_LEN, ErrorCodes, RoutingStrategy, err_msg
 
-log_folder = "/nvme2/share/chenjiefei/scripts/proxy_log/"
+from viztracer import VizTracer
+
+log_folder = "/nvme4/share/chenjiefei/scripts/proxy_log/"
 
 if not os.path.exists(log_folder):
     os.makedirs(log_folder, exist_ok=True)
@@ -168,13 +170,16 @@ class NodeManager:
         self.metric_collector_task = None
         self.metric_running = False
 
-        # 启动异步收集线程
-        self.metric_running = True
-        self.metric_collector_thread = threading.Thread(target=self._run_metric_collector, daemon=True)
-        self.metric_collector_thread.start()
+        # # 启动异步收集线程
+        # self.metric_running = True
+        # self.metric_collector_thread = threading.Thread(target=self._run_metric_collector, daemon=True)
+        # self.metric_collector_thread.start()
 
-        self.metric_logger_thread = threading.Thread(target=self._log_metrics_loop, daemon=True)
-        self.metric_logger_thread.start()
+        # self.metric_logger_thread = threading.Thread(target=self._log_metrics_loop, daemon=True)
+        # self.metric_logger_thread.start()
+
+        # Profiler
+        self.tracer = VizTracer()
 
     def get_nodes(self, role: EngineRole) -> Dict:
         items = list(self.nodes.items())
@@ -802,6 +807,27 @@ app.add_middleware(
 )
 node_manager: NodeManager = None
 
+# curl -X POST "http://0.0.0.0:8050/profiler/start"
+@app.post('/profiler/start', dependencies=[Depends(check_api_key)])
+def start_profiler():
+    """启动性能分析"""
+    node_manager.tracer.start()
+    return {"status": "Profiler start"}
+
+# curl -X POST "http://0.0.0.0:8050/profiler/stop"
+@app.post('/profiler/stop', dependencies=[Depends(check_api_key)])
+def stop_profiler(output_file: Optional[str] = f"/nvme4/share/chenjiefei/scripts/proxy_trace/proxy_{time.time():.6f}.json"):
+    node_manager.tracer.stop()
+    # 保存结果，支持自定义输出文件
+    if output_file:
+        node_manager.tracer.save(output_file=output_file)
+    else:
+        node_manager.tracer.save()
+
+    # 打印保存信息
+    logger.info(f"Profiler results saved successfully. File: {output_file}")
+
+    return {"status": "Profiler stopped and results saved"}
 
 @app.get('/v1/models', dependencies=[Depends(check_api_key)])
 def available_models():
