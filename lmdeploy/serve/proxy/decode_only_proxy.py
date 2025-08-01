@@ -653,7 +653,7 @@ class NodeManager:
         }
         return json.dumps(ret).encode() + b'\n'
 
-    async def stream_generate(self, request: Dict, node_url: str, endpoint: str):
+    async def stream_generate(self, request: Dict, node_url: str, endpoint: str, proxy_recv_time: Optional[float] = None):
         """Return a generator to handle the input request.
 
         Args:
@@ -678,9 +678,22 @@ class NodeManager:
                             if line_str != 'data: [DONE]':
                                 try:
                                     data = json.loads(line[len(b'data: '):])
-                                    # 检查是否有usage字段
-                                    if 'usage' in data and 'total_tokens' in data['usage']:
+                                    
+                                    # 添加proxy相关时间字段
+                                    # 确保usage字段存在
+                                    if 'usage' not in data:
+                                        data['usage'] = {}
 
+                                    # 添加proxy_send_time字段
+                                    proxy_send_time = time.time()
+                                    data['usage']['proxy_send_time'] = proxy_send_time
+                                    
+                                    # 当proxy_recv_time不为None时添加该字段
+                                    if proxy_recv_time is not None:
+                                        data['usage']['proxy_recv_time'] = proxy_recv_time
+                                    
+                                    # 检查是否有usage字段并更新
+                                    if 'total_tokens' in data['usage']:
                                         current_completion_tokens = data['usage']['completion_tokens']
                                         # 计算token增量
                                         token_delta = current_completion_tokens - last_completion_tokens
@@ -703,14 +716,21 @@ class NodeManager:
                                         elif current_completion_tokens == 1:  # 第一个Decode token，初始化时间
                                             last_decode_time = time.time()
 
-                                    if 'usage' in data and 'queued_time' in data['usage']:
+                                    if 'queued_time' in data['usage']:
                                         queueing_latency = data['usage']['queued_time']
-
+                                    
+                                    # 将修改后的数据转换回字节
+                                    modified_line = b'data: ' + json.dumps(data).encode('utf-8')
                                 except json.JSONDecodeError:
                                     logger.warning(f'Failed to parse JSON: {line}')
+                                    modified_line = line  # 解析失败时使用原始行
+                            else:
+                                modified_line = line  # 对于[DONE]消息不做修改
+                        else:
+                            modified_line = line  # 非data行不做修改
 
-                        if line.strip():
-                            yield line + b'\n\n'
+                        if modified_line.strip():
+                            yield modified_line + b'\n\n'
 
         except (Exception, GeneratorExit, aiohttp.ClientError) as e:  # noqa
             logger.error(f'catched an exception: {e}')
@@ -1087,6 +1107,8 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
     elif node_manager.serving_strategy == ServingStrategy.DistServe:
         request_dict = request.model_dump()
 
+        proxy_recv_time = time.time()
+
         # Prefill
         prefill_request_dict = copy.deepcopy(request_dict)
         prefill_request_dict['max_tokens'] = 1
@@ -1151,7 +1173,7 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
 
         start = node_manager.pre_call(d_url)
         if request.stream is True:
-            response = node_manager.stream_generate(request_dict, d_url, '/v1/completions')
+            response = node_manager.stream_generate(request_dict, d_url, '/v1/completions', proxy_recv_time)
             background_task = node_manager.create_background_tasks(d_url, start)
             resp = StreamingResponse(response, background=background_task)
         else:
