@@ -58,6 +58,8 @@ class UsageInfo(BaseModel):
     queued_time: Optional[float] = None
     preprocess_before_queue: Optional[float] = None
     inference_time: Optional[float] = None
+    server_recv_time: Optional[float] = None
+    server_send_time: Optional[float] = None
     
 
 class Function(BaseModel):

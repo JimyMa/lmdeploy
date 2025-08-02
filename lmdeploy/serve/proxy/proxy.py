@@ -31,7 +31,11 @@ from lmdeploy.serve.openai.protocol import ChatCompletionRequest, CompletionRequ
 from lmdeploy.serve.proxy.constants import AIOHTTP_TIMEOUT, LATENCY_DEQUE_LEN, ErrorCodes, RoutingStrategy, err_msg
 from lmdeploy.utils import get_logger
 
-logger = get_logger('lmdeploy')
+from viztracer import VizTracer
+
+os.environ['TZ'] = 'Asia/Shanghai'
+time.tzset()
+logger = get_logger('lmdeploy',log_formatter='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 
 class Status(BaseModel):
@@ -110,6 +114,14 @@ class NodeManager:
         self.rdma_config = DistServeRDMAConfig(with_gdr=with_gdr, link_type=RDMALinkType[link_type])
         self.pd_connection_pool = PDConnectionPool()
         self.dummy_prefill = False
+
+        # Profiler
+        self.tracer = VizTracer(tracer_entries=1000000)
+        
+        self.aiotimeout = aiohttp.ClientTimeout(total=AIOHTTP_TIMEOUT)
+        self.connector = None
+        self.session_pool = None
+        self.pool_lock = asyncio.Lock()
 
     def get_nodes(self, role: EngineRole) -> Dict:
         items = list(self.nodes.items())
@@ -337,8 +349,21 @@ class NodeManager:
             'text': err_msg[ErrorCodes.API_TIMEOUT],
         }
         return json.dumps(ret).encode() + b'\n'
+    
+    async def get_session(self):
+        """异步获取或创建连接池会话"""
+        if self.session_pool is None:
+            async with self.pool_lock:
+                if self.session_pool is None:  # 双重检查
+                    self.connector = aiohttp.TCPConnector(limit=16384,limit_per_host=16384)
+                    self.session_pool = aiohttp.ClientSession(
+                        connector=self.connector,
+                        timeout=self.aiotimeout
+                    )
 
-    async def stream_generate(self, request: Dict, node_url: str, endpoint: str):
+        return self.session_pool
+
+    async def stream_generate(self, request: Dict, node_url: str, endpoint: str, proxy_recv_time: Optional[float] = None):
         """Return a generator to handle the input request.
 
         Args:
@@ -348,11 +373,48 @@ class NodeManager:
         """
         request['stream_options'] = {'include_usage': True}
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(node_url + endpoint, json=request, timeout=self.aiotimeout) as response:
-                    async for line in response.content:
-                        if line.strip():
-                            yield line + b'\n\n'
+            # 获取连接池中的会话
+            session = await self.get_session()
+            async with session.post(node_url + endpoint, json=request, timeout=self.aiotimeout) as response:
+                async for line in response.content:
+                    # print(f"output: {line}",flush=True)
+                    if line.startswith(b'data: '):
+                        line_str = line.decode('utf-8').strip()
+                        if line_str != 'data: [DONE]':
+                            try:
+                                data = json.loads(line[len(b'data: '):])
+
+                                # print(f"data: {data}",flush=True)
+                                
+                                # 添加proxy相关时间字段
+                                # 确保usage字段存在
+                                if 'usage' not in data:
+                                    data['usage'] = {}
+
+                                # 添加proxy_send_time字段
+                                proxy_send_time = time.time()
+                                data['usage']['proxy_send_time'] = proxy_send_time
+                                
+                                # 当proxy_recv_time不为None时添加该字段
+                                if proxy_recv_time is not None:
+                                    data['usage']['proxy_recv_time'] = proxy_recv_time
+
+                                # 将修改后的数据转换回字节
+                                modified_line = b'data: ' + json.dumps(data).encode('utf-8')
+                            except json.JSONDecodeError:
+                                logger.warning(f'Failed to parse JSON: {line}')
+                                modified_line = line  # 解析失败时使用原始行
+                        else:
+                            modified_line = line  # 对于[DONE]消息不做修改
+                    else:
+                        modified_line = line  # 非data行不做修改
+
+                    if modified_line.strip():
+                        yield modified_line + b'\n\n'
+
+                    # if line.strip():
+                    #     yield line + b'\n\n'
+
         except (Exception, GeneratorExit, aiohttp.ClientError) as e:  # noqa
             logger.error(f'catched an exception: {e}')
             # exception happened, reduce unfinished num
@@ -415,6 +477,27 @@ app.add_middleware(
 )
 node_manager = NodeManager()
 
+# curl -X POST "http://0.0.0.0:8050/profiler/start"
+@app.post('/profiler/start', dependencies=[Depends(check_api_key)])
+def start_profiler():
+    """启动性能分析"""
+    node_manager.tracer.start()
+    return {"status": "Profiler start"}
+
+# curl -X POST "http://0.0.0.0:8050/profiler/stop"
+@app.post('/profiler/stop', dependencies=[Depends(check_api_key)])
+def stop_profiler(output_file: Optional[str] = f"/nvme4/share/chenjiefei/scripts/proxy_trace/proxy_{time.time():.6f}.json"):
+    node_manager.tracer.stop()
+    # 保存结果，支持自定义输出文件
+    if output_file:
+        node_manager.tracer.save(output_file=output_file)
+    else:
+        node_manager.tracer.save()
+
+    # 打印保存信息
+    logger.info(f"Profiler results saved successfully. File: {output_file}")
+
+    return {"status": "Profiler stopped and results saved"}
 
 @app.get('/v1/models', dependencies=[Depends(check_api_key)])
 def available_models():
@@ -720,6 +803,8 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
     elif node_manager.serving_strategy == ServingStrategy.DistServe:
         request_dict = request.model_dump()
 
+        proxy_recv_time = time.time()
+
         # Prefill
         prefill_request_dict = copy.deepcopy(request_dict)
         prefill_request_dict['max_tokens'] = 1
@@ -784,7 +869,7 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
 
         start = node_manager.pre_call(d_url)
         if request.stream is True:
-            response = node_manager.stream_generate(request_dict, d_url, '/v1/completions')
+            response = node_manager.stream_generate(request_dict, d_url, '/v1/completions', proxy_recv_time)
             background_task = node_manager.create_background_tasks(d_url, start)
             resp = StreamingResponse(response, background=background_task)
         else:
