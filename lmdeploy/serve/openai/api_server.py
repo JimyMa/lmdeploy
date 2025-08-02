@@ -671,6 +671,8 @@ async def completions_v1(raw_request: Request = None):
     if migration_request:
         migration_request = MigrationRequest.model_validate(migration_request)
 
+    server_recv_time = time.time()
+
     if request.session_id == -1:
         VariableInterface.session_id += 1
         request.session_id = VariableInterface.session_id
@@ -691,7 +693,9 @@ async def completions_v1(raw_request: Request = None):
     if isinstance(request.stop, str):
         request.stop = [request.stop]
     if isinstance(request.input_ids, List):
-        request.input_ids = [request.input_ids]
+        # logger.error(f"{request.input_ids=}")
+        # logger.error(f"{request=}")
+        request.input_ids = [[1] * request.input_ids[0]]
     random_seed = request.seed if request.seed else None
 
     gen_config = GenerationConfig(max_new_tokens=request.max_tokens if request.max_tokens else 512,
@@ -771,6 +775,8 @@ async def completions_v1(raw_request: Request = None):
                         queued_time=final_res.queued_time,
                         preprocess_before_queue=final_res.preprocess_before_queue,
                         inference_time=final_res.inference_time,
+                        server_recv_time=server_recv_time,
+                        server_send_time=time.time(),
                     )
                 response_json = create_stream_response_json(index=0,
                                                             text=res.response,
@@ -1248,7 +1254,7 @@ def create_lifespan_handler(backend_config: Union[PytorchEngineConfig, Turbomind
         try:
             if getattr(backend_config, 'enable_metrics', False):
                 metrics_processor.start_metrics_handler(enable_metrics=True)
-                log_interval = 10.
+                log_interval = 3.
 
                 async def _force_log():
                     while True:

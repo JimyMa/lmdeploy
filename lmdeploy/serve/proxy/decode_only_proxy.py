@@ -179,7 +179,12 @@ class NodeManager:
         # self.metric_logger_thread.start()
 
         # Profiler
-        self.tracer = VizTracer()
+        self.tracer = VizTracer(tracer_entries=10000000)
+
+        self.aiotimeout = aiohttp.ClientTimeout(total=AIOHTTP_TIMEOUT)
+        self.connector = None
+        self.session_pool = None
+        self.pool_lock = asyncio.Lock()
 
     def get_nodes(self, role: EngineRole) -> Dict:
         items = list(self.nodes.items())
@@ -658,6 +663,19 @@ class NodeManager:
         }
         return json.dumps(ret).encode() + b'\n'
 
+    async def get_session(self):
+        """异步获取或创建连接池会话"""
+        if self.session_pool is None:
+            async with self.pool_lock:
+                if self.session_pool is None:  # 双重检查
+                    self.connector = aiohttp.TCPConnector(limit=16384,limit_per_host=16384)
+                    self.session_pool = aiohttp.ClientSession(
+                        connector=self.connector,
+                        timeout=self.aiotimeout
+                    )
+
+        return self.session_pool
+
     async def stream_generate(self, request: Dict, node_url: str, endpoint: str, proxy_recv_time: Optional[float] = None):
         """Return a generator to handle the input request.
 
@@ -672,70 +690,70 @@ class NodeManager:
         queueing_latency = 0
         try:
             request['stream_options'] = {'include_usage': True}  # 添加stream_options字段，用于统计Decode的KV Cache使用量
-            async with aiohttp.ClientSession() as session:
-                # print(f"proxy request: {request}",flush=True)
-                async with session.post(node_url + endpoint, json=request, timeout=self.aiotimeout) as response:
-                    async for line in response.content:
-                        # print(f"stream output line: {line}")
-                        # 解析token使用情况
-                        if line.startswith(b'data: '):
-                            line_str = line.decode('utf-8').strip()
-                            if line_str != 'data: [DONE]':
-                                try:
-                                    data = json.loads(line[len(b'data: '):])
-                                    
-                                    # 添加proxy相关时间字段
-                                    # 确保usage字段存在
-                                    if 'usage' not in data:
-                                        data['usage'] = {}
+            # 获取连接池中的会话
+            session = await self.get_session()
+            async with session.post(node_url + endpoint, json=request, timeout=self.aiotimeout) as response:
+                async for line in response.content:
+                    # print(f"stream output line: {line}")
+                    # 解析token使用情况
+                    if line.startswith(b'data: '):
+                        line_str = line.decode('utf-8').strip()
+                        if line_str != 'data: [DONE]':
+                            try:
+                                data = json.loads(line[len(b'data: '):])
+                                
+                                # 添加proxy相关时间字段
+                                # 确保usage字段存在
+                                if 'usage' not in data:
+                                    data['usage'] = {}
 
-                                    # 添加proxy_send_time字段
-                                    proxy_send_time = time.time()
-                                    data['usage']['proxy_send_time'] = proxy_send_time
-                                    
-                                    # 当proxy_recv_time不为None时添加该字段
-                                    if proxy_recv_time is not None:
-                                        data['usage']['proxy_recv_time'] = proxy_recv_time
-                                    
-                                    # 检查是否有usage字段并更新
-                                    if 'total_tokens' in data['usage']:
-                                        current_completion_tokens = data['usage']['completion_tokens']
-                                        # 计算token增量
-                                        token_delta = current_completion_tokens - last_completion_tokens
-                                        last_completion_tokens = current_completion_tokens
-                                        last_tokens = data['usage']['total_tokens']
+                                # 添加proxy_send_time字段
+                                proxy_send_time = time.time()
+                                data['usage']['proxy_send_time'] = proxy_send_time
+                                
+                                # 当proxy_recv_time不为None时添加该字段
+                                if proxy_recv_time is not None:
+                                    data['usage']['proxy_recv_time'] = proxy_recv_time
+                                
+                                # 检查是否有usage字段并更新
+                                if 'total_tokens' in data['usage']:
+                                    current_completion_tokens = data['usage']['completion_tokens']
+                                    # 计算token增量
+                                    token_delta = current_completion_tokens - last_completion_tokens
+                                    last_completion_tokens = current_completion_tokens
+                                    last_tokens = data['usage']['total_tokens']
 
-                                        # 更新节点总token数
-                                        if node_url in self.nodes:
-                                            with self.node_locks.get(node_url, threading.Lock()):
-                                                self.nodes[node_url].total_token_nums += token_delta
+                                    # 更新节点总token数
+                                    if node_url in self.nodes:
+                                        with self.node_locks.get(node_url, threading.Lock()):
+                                            self.nodes[node_url].total_token_nums += token_delta
 
-                                        # 记录Decode阶段的token间延迟
-                                        if current_completion_tokens > 1:  # 跳过Prefill阶段
-                                            current_time = time.time()
-                                            if last_decode_time is not None:
-                                                itl = int((current_time - last_decode_time) * 1000)  # 转换为毫秒
-                                                if node_url in self.nodes:
-                                                    self.nodes[node_url].history_itl.append(itl)
-                                            last_decode_time = current_time
-                                        elif current_completion_tokens == 1:  # 第一个Decode token，初始化时间
-                                            last_decode_time = time.time()
+                                    # 记录Decode阶段的token间延迟
+                                    if current_completion_tokens > 1:  # 跳过Prefill阶段
+                                        current_time = time.time()
+                                        if last_decode_time is not None:
+                                            itl = int((current_time - last_decode_time) * 1000)  # 转换为毫秒
+                                            if node_url in self.nodes:
+                                                self.nodes[node_url].history_itl.append(itl)
+                                        last_decode_time = current_time
+                                    elif current_completion_tokens == 1:  # 第一个Decode token，初始化时间
+                                        last_decode_time = time.time()
 
-                                    if 'queued_time' in data['usage']:
-                                        queueing_latency = data['usage']['queued_time']
-                                    
-                                    # 将修改后的数据转换回字节
-                                    modified_line = b'data: ' + json.dumps(data).encode('utf-8')
-                                except json.JSONDecodeError:
-                                    logger.warning(f'Failed to parse JSON: {line}')
-                                    modified_line = line  # 解析失败时使用原始行
-                            else:
-                                modified_line = line  # 对于[DONE]消息不做修改
+                                if 'queued_time' in data['usage']:
+                                    queueing_latency = data['usage']['queued_time']
+                                
+                                # 将修改后的数据转换回字节
+                                modified_line = b'data: ' + json.dumps(data).encode('utf-8')
+                            except json.JSONDecodeError:
+                                logger.warning(f'Failed to parse JSON: {line}')
+                                modified_line = line  # 解析失败时使用原始行
                         else:
-                            modified_line = line  # 非data行不做修改
+                            modified_line = line  # 对于[DONE]消息不做修改
+                    else:
+                        modified_line = line  # 非data行不做修改
 
-                        if modified_line.strip():
-                            yield modified_line + b'\n\n'
+                    if modified_line.strip():
+                        yield modified_line + b'\n\n'
 
         except (Exception, GeneratorExit, aiohttp.ClientError) as e:  # noqa
             logger.error(f'catched an exception: {e}')

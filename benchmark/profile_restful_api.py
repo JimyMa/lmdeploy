@@ -46,6 +46,22 @@ if _timeout_value is not None:
 
 global args
 
+# 连接池全局实例
+session_pool = None
+pool_lock = asyncio.Lock()
+
+async def get_session():
+    """获取或创建连接池会话"""
+    global session_pool
+    if session_pool is None:
+        async with pool_lock:
+            if session_pool is None:  # 双重检查
+                connector = aiohttp.TCPConnector(limit=16384,limit_per_host=16384)  # 连接池大小设为8192
+                session_pool = aiohttp.ClientSession(
+                    connector=connector,
+                    timeout=AIOHTTP_TIMEOUT
+                )
+    return session_pool
 
 @dataclass
 class RequestFuncInput:
@@ -73,6 +89,11 @@ class RequestFuncOutput:
     prompt_len: int = 0
     error: str = ''
     output_len: int = 0
+    # client2proxy -> proxy2server -> server -> server2proxy -> proxy2client
+    client2proxy_time: float = 0.0
+    proxy2server_time: float = 0.0
+    server2proxy_time: List[float] = field(default_factory=list)
+    proxy2client_time: List[float] = field(default_factory=list)
 
 
 def remove_prefix(text: str, prefix: str) -> str:
@@ -88,66 +109,67 @@ async def async_request_trt_llm(
     api_url = request_func_input.api_url
     assert api_url.endswith('generate_stream')
 
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-        payload = {
-            'accumulate_tokens': True,
-            'text_input': request_func_input.prompt,
-            'temperature': 0.000001,
-            'top_p': 1.0,
-            'max_tokens': request_func_input.output_len,
-            'stream': True,
-            'min_length': request_func_input.output_len,
-            'end_id': 1048576,
-            **request_func_input.extra_request_body,
-        }
-        if args.disable_ignore_eos:
-            del payload['min_length']
-            del payload['end_id']
-        output = RequestFuncOutput()
-        output.prompt_len = request_func_input.prompt_len
+    # async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+    payload = {
+        'accumulate_tokens': True,
+        'text_input': request_func_input.prompt,
+        'temperature': 0.000001,
+        'top_p': 1.0,
+        'max_tokens': request_func_input.output_len,
+        'stream': True,
+        'min_length': request_func_input.output_len,
+        'end_id': 1048576,
+        **request_func_input.extra_request_body,
+    }
+    if args.disable_ignore_eos:
+        del payload['min_length']
+        del payload['end_id']
+    output = RequestFuncOutput()
+    output.prompt_len = request_func_input.prompt_len
 
-        ttft = 0.0
-        st = time.perf_counter()
-        most_recent_timestamp = st
-        try:
-            async with session.post(url=api_url, json=payload) as response:
-                if response.status == 200:
-                    async for chunk_bytes in response.content:
-                        chunk_bytes = chunk_bytes.strip()
-                        if not chunk_bytes:
-                            continue
+    ttft = 0.0
+    st = time.perf_counter()
+    most_recent_timestamp = st
+    try:
+        session = await get_session()
+        async with session.post(url=api_url, json=payload) as response:
+            if response.status == 200:
+                async for chunk_bytes in response.content:
+                    chunk_bytes = chunk_bytes.strip()
+                    if not chunk_bytes:
+                        continue
 
-                        chunk = remove_prefix(chunk_bytes.decode('utf-8'), 'data:')
+                    chunk = remove_prefix(chunk_bytes.decode('utf-8'), 'data:')
 
-                        data = json.loads(chunk)
-                        output.generated_text += data['text_output']
-                        timestamp = time.perf_counter()
-                        # First token
-                        if ttft == 0.0:
-                            ttft = time.perf_counter() - st
-                            output.ttft = ttft
+                    data = json.loads(chunk)
+                    output.generated_text += data['text_output']
+                    timestamp = time.perf_counter()
+                    # First token
+                    if ttft == 0.0:
+                        ttft = time.perf_counter() - st
+                        output.ttft = ttft
 
-                        # Decoding phase
-                        else:
-                            output.itl.append(timestamp - most_recent_timestamp)
+                    # Decoding phase
+                    else:
+                        output.itl.append(timestamp - most_recent_timestamp)
 
-                        most_recent_timestamp = timestamp
+                    most_recent_timestamp = timestamp
 
-                    output.latency = most_recent_timestamp - st
-                    output.success = True
-                    output.output_len = request_func_input.output_len
+                output.latency = most_recent_timestamp - st
+                output.success = True
+                output.output_len = request_func_input.output_len
 
-                else:
-                    output.error = response.reason or ''
-                    output.success = False
-        except Exception:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = ''.join(traceback.format_exception(*exc_info))
+            else:
+                output.error = response.reason or ''
+                output.success = False
+    except Exception:
+        output.success = False
+        exc_info = sys.exc_info()
+        output.error = ''.join(traceback.format_exception(*exc_info))
 
-        if pbar:
-            pbar.update(1)
-        return output
+    if pbar:
+        pbar.update(1)
+    return output
 
 
 # set ignore_eos True by default
@@ -160,110 +182,123 @@ async def async_request_openai_completions(
 
     prompt = request_func_input.prompt
 
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-        payload = {
-            'model': request_func_input.model,
-            # 'prompt': prompt,
-            'temperature': 0.0,
-            'best_of': 1,
-            'max_tokens': request_func_input.output_len,
-            'stream': not args.disable_stream,
-            'ignore_eos': not args.disable_ignore_eos,
-            'input_ids': request_func_input.input_ids,
-            **request_func_input.extra_request_body,
-        }
-        headers = {'Authorization': f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
+    # async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+    payload = {
+        'model': request_func_input.model,
+        # 'prompt': prompt,
+        'temperature': 0.0,
+        'best_of': 1,
+        'max_tokens': request_func_input.output_len,
+        'stream': not args.disable_stream,
+        'ignore_eos': not args.disable_ignore_eos,
+        'input_ids': [len(request_func_input.input_ids)],
+        # 'input_ids': request_func_input.input_ids,
+        **request_func_input.extra_request_body,
+    }
+    # print(f"input_ids: {[len(request_func_input.input_ids)]}",flush=True)
+    headers = {'Authorization': f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
 
-        output = RequestFuncOutput()
-        output.prompt_len = request_func_input.prompt_len
+    output = RequestFuncOutput()
+    output.prompt_len = request_func_input.prompt_len
 
-        generated_text = ''
-        ttft = 0.0
-        has_count_ttft = False
-        st = time.perf_counter()
-        itl = []
-        last_token_idx=0
-        most_recent_timestamp = st
-        try:
-            async with session.post(url=api_url, json=payload, headers=headers) as response:
-                if response.status == 200:
-                    async for chunk_bytes in response.content:
-                        chunk_bytes = chunk_bytes.strip()
-                        if not chunk_bytes:
-                            continue
+    generated_text = ''
+    ttft = 0.0
+    has_count_ttft = False
+    st = time.perf_counter()
+    client_time = time.time()
+    itl = []
+    last_token_idx=0
+    most_recent_timestamp = st
+    try:
+        session = await get_session()
+        async with session.post(url=api_url, json=payload, headers=headers) as response:
+            if response.status == 200:
+                async for chunk_bytes in response.content:
+                    chunk_bytes = chunk_bytes.strip()
+                    if not chunk_bytes:
+                        continue
 
-                        chunk = remove_prefix(chunk_bytes.decode('utf-8'), 'data: ')
-                        latency = time.perf_counter() - st
-                        if chunk == '[DONE]':
-                            pass
+                    chunk = remove_prefix(chunk_bytes.decode('utf-8'), 'data: ')
+                    latency = time.perf_counter() - st
+                    if chunk == '[DONE]':
+                        pass
+                    else:
+                        data = json.loads(chunk)
+
+                        # NOTE: Some completion API might have a last
+                        # usage summary response without a token so we
+                        # want to check a token was generated
+                        # if data['choices'][0]['text']:
+                        #     timestamp = time.perf_counter()
+                        #     # First token
+                        #     if ttft == 0.0:
+                        #         # print(f"TTFT data: {data}",flush=True)
+                        #         ttft = time.perf_counter() - st
+                        #         output.ttft = ttft
+
+                        #     # Decoding phase
+                        #     else:
+                        #         # print(f"TPOT data: {data}",flush=True)
+                        #         output.itl.append(timestamp - most_recent_timestamp)
+
+                        #     most_recent_timestamp = timestamp
+                        #     generated_text += data['choices'][0]['text']
+                        
+                        # 移除if判断，直接记录时间
+                        timestamp = time.perf_counter()
+                        # First token
+                        if has_count_ttft == False:
+                            # print(f"TTFT data: {data}", flush=True)
+                            ttft = time.perf_counter() - st
+                            output.ttft = 0
+                            output.queueing_latency = data['usage']['queued_time']
+                            output.preprocess_before_queue = data['usage']['preprocess_before_queue']
+                            output.itl.append(ttft)
+                            itl.append(ttft)
+                            most_recent_timestamp = timestamp
+                            has_count_ttft = True
+
+                            # client2proxy -> proxy2server -> server -> server2proxy -> proxy2client
+                            if data['usage']['completion_tokens'] and data['usage']['total_tokens']:
+                                output.itl_new_token_index.append(data['usage']['completion_tokens']-last_token_idx)
+                                output.itl_total_token_index.append(data['usage']['total_tokens'])
+                                last_token_idx = data['usage']['completion_tokens']
+                                output.client2proxy_time = data['usage']['proxy_recv_time'] - client_time
+                                output.proxy2server_time = data['usage']['server_recv_time'] - data['usage']['proxy_recv_time']
+                                output.server2proxy_time.append(data['usage']['proxy_send_time']-data['usage']['server_send_time'])
+                                output.proxy2client_time.append(time.time()-data['usage']['proxy_send_time'])
                         else:
-                            data = json.loads(chunk)
-
-                            # NOTE: Some completion API might have a last
-                            # usage summary response without a token so we
-                            # want to check a token was generated
-                            # if data['choices'][0]['text']:
-                            #     timestamp = time.perf_counter()
-                            #     # First token
-                            #     if ttft == 0.0:
-                            #         # print(f"TTFT data: {data}",flush=True)
-                            #         ttft = time.perf_counter() - st
-                            #         output.ttft = ttft
-
-                            #     # Decoding phase
-                            #     else:
-                            #         # print(f"TPOT data: {data}",flush=True)
-                            #         output.itl.append(timestamp - most_recent_timestamp)
-
-                            #     most_recent_timestamp = timestamp
-                            #     generated_text += data['choices'][0]['text']
-                            
-                            # 移除if判断，直接记录时间
-                            timestamp = time.perf_counter()
-                            # First token
-                            if has_count_ttft == False:
-                                # print(f"TTFT data: {data}", flush=True)
-                                ttft = time.perf_counter() - st
-                                output.ttft = 0
-                                output.queueing_latency = data['usage']['queued_time']
-                                output.preprocess_before_queue = data['usage']['preprocess_before_queue']
-                                output.itl.append(ttft)
-                                itl.append(ttft)
+                            if data['choices'][0]['text']:
+                                # print(f"TPOT data: {data}",flush=True)
+                                output.itl.append(timestamp - most_recent_timestamp)
+                                generated_text += data['choices'][0]['text']
+                                itl.append(timestamp - most_recent_timestamp)
                                 most_recent_timestamp = timestamp
-                                has_count_ttft = True
 
                                 if data['usage']['completion_tokens'] and data['usage']['total_tokens']:
                                     output.itl_new_token_index.append(data['usage']['completion_tokens']-last_token_idx)
                                     output.itl_total_token_index.append(data['usage']['total_tokens'])
                                     last_token_idx = data['usage']['completion_tokens']
-                            else:
-                                if data['choices'][0]['text']:
-                                    # print(f"TPOT data: {data}",flush=True)
-                                    output.itl.append(timestamp - most_recent_timestamp)
-                                    generated_text += data['choices'][0]['text']
-                                    itl.append(timestamp - most_recent_timestamp)
-                                    most_recent_timestamp = timestamp
+                                    output.client2proxy_time = data['usage']['proxy_recv_time'] - client_time
+                                    output.proxy2server_time = data['usage']['server_recv_time'] - data['usage']['proxy_recv_time']
+                                    output.server2proxy_time.append(data['usage']['proxy_send_time']-data['usage']['server_send_time'])
+                                    output.proxy2client_time.append(time.time()-data['usage']['proxy_send_time'])
 
-                                    if data['usage']['completion_tokens'] and data['usage']['total_tokens']:
-                                        output.itl_new_token_index.append(data['usage']['completion_tokens']-last_token_idx)
-                                        output.itl_total_token_index.append(data['usage']['total_tokens'])
-                                        last_token_idx = data['usage']['completion_tokens']
+                        if data['usage'] and data['usage']['inference_time']:
+                            output.server_inference_time = data['usage']['inference_time']
 
-                            if data['usage'] and data['usage']['inference_time']:
-                                output.server_inference_time = data['usage']['inference_time']
-
-                    output.generated_text = generated_text
-                    output.success = True
-                    output.latency = latency
-                    output.output_len = request_func_input.output_len
-                    # print(f"Request itl: {itl}, latency: {latency}")
-                else:
-                    output.error = response.reason or ''
-                    output.success = False
-        except Exception:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = ''.join(traceback.format_exception(*exc_info))
+                output.generated_text = generated_text
+                output.success = True
+                output.latency = latency
+                output.output_len = request_func_input.output_len
+                # print(f"Request itl: {itl}, latency: {latency}")
+            else:
+                output.error = response.reason or ''
+                output.success = False
+    except Exception:
+        output.success = False
+        exc_info = sys.exc_info()
+        output.error = ''.join(traceback.format_exception(*exc_info))
 
     if pbar:
         pbar.update(1)
@@ -277,70 +312,71 @@ async def async_request_sglang_generate(
     api_url = request_func_input.api_url
     prompt = request_func_input.prompt
 
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-        payload = {
-            'text': prompt,
-            'sampling_params': {
-                'temperature': 0.0,
-                'max_new_tokens': request_func_input.output_len,
-                'ignore_eos': not args.disable_ignore_eos,
-            },
-            'stream': not args.disable_stream,
-            **request_func_input.extra_request_body,
-        }
-        headers = {}
+    # async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+    payload = {
+        'text': prompt,
+        'sampling_params': {
+            'temperature': 0.0,
+            'max_new_tokens': request_func_input.output_len,
+            'ignore_eos': not args.disable_ignore_eos,
+        },
+        'stream': not args.disable_stream,
+        **request_func_input.extra_request_body,
+    }
+    headers = {}
 
-        output = RequestFuncOutput()
-        output.prompt_len = request_func_input.prompt_len
+    output = RequestFuncOutput()
+    output.prompt_len = request_func_input.prompt_len
 
-        generated_text = ''
-        ttft = 0.0
-        st = time.perf_counter()
-        most_recent_timestamp = st
-        try:
-            async with session.post(url=api_url, json=payload, headers=headers) as response:
-                if response.status == 200:
-                    async for chunk_bytes in response.content:
-                        chunk_bytes = chunk_bytes.strip()
-                        if not chunk_bytes:
-                            continue
-                        # print(chunk_bytes)
+    generated_text = ''
+    ttft = 0.0
+    st = time.perf_counter()
+    most_recent_timestamp = st
+    try:
+        session = await get_session()
+        async with session.post(url=api_url, json=payload, headers=headers) as response:
+            if response.status == 200:
+                async for chunk_bytes in response.content:
+                    chunk_bytes = chunk_bytes.strip()
+                    if not chunk_bytes:
+                        continue
+                    # print(chunk_bytes)
 
-                        chunk = remove_prefix(chunk_bytes.decode('utf-8'), 'data: ')
-                        latency = time.perf_counter() - st
-                        if chunk == '[DONE]':
-                            pass
-                        else:
-                            data = json.loads(chunk)
+                    chunk = remove_prefix(chunk_bytes.decode('utf-8'), 'data: ')
+                    latency = time.perf_counter() - st
+                    if chunk == '[DONE]':
+                        pass
+                    else:
+                        data = json.loads(chunk)
 
-                            # NOTE: Some completion API might have a last
-                            # usage summary response without a token so we
-                            # want to check a token was generated
-                            if data['text']:
-                                timestamp = time.perf_counter()
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = time.perf_counter() - st
-                                    output.ttft = ttft
+                        # NOTE: Some completion API might have a last
+                        # usage summary response without a token so we
+                        # want to check a token was generated
+                        if data['text']:
+                            timestamp = time.perf_counter()
+                            # First token
+                            if ttft == 0.0:
+                                ttft = time.perf_counter() - st
+                                output.ttft = ttft
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
+                            # Decoding phase
+                            else:
+                                output.itl.append(timestamp - most_recent_timestamp)
 
-                                most_recent_timestamp = timestamp
-                                generated_text = data['text']
+                            most_recent_timestamp = timestamp
+                            generated_text = data['text']
 
-                    output.generated_text = generated_text
-                    output.success = True
-                    output.latency = latency
-                    output.output_len = request_func_input.output_len
-                else:
-                    output.error = response.reason or ''
-                    output.success = False
-        except Exception:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = ''.join(traceback.format_exception(*exc_info))
+                output.generated_text = generated_text
+                output.success = True
+                output.latency = latency
+                output.output_len = request_func_input.output_len
+            else:
+                output.error = response.reason or ''
+                output.success = False
+    except Exception:
+        output.success = False
+        exc_info = sys.exc_info()
+        output.error = ''.join(traceback.format_exception(*exc_info))
 
     if pbar:
         pbar.update(1)
@@ -727,7 +763,8 @@ async def benchmark(
             prompt_len=test_prompt_len,
             output_len=test_output_len,
             extra_request_body=extra_request_body,
-            input_ids=[1] * test_prompt_len)
+            # input_ids=[1] * test_prompt_len)
+            input_ids=[test_prompt_len])
         test_output = await request_func(request_func_input=test_input)
         if not test_output.success:
             raise ValueError('Initial test run failed - Please make sure benchmark arguments '
@@ -899,7 +936,7 @@ async def benchmark(
 def save_request_details(request_ids: List[int], outputs: List[RequestFuncOutput], base_dir: str = None):
     """保存每个请求的详细指标到指定目录的CSV文件"""
     # 设置默认目录
-    default_dir = "/nvme2/share/chenjiefei/scripts/csv/"
+    default_dir = "/nvme4/share/chenjiefei/scripts/csv/"
     target_dir = base_dir or default_dir
     
     # 确保目录存在
@@ -917,7 +954,7 @@ def save_request_details(request_ids: List[int], outputs: List[RequestFuncOutput
     # 定义CSV字段
     fieldnames = [
         'request_id', 'prompt_len', 'output_len', 'server_inference_tpot', 'queueing_latency', 'tpot', 'tpot_wo_queue',
-        'itl', 'itl_new_token_index', 'itl_total_token_index', 'preprocess_before_queue',
+        'itl', 'itl_new_token_index', 'itl_total_token_index', 'preprocess_before_queue', 'client2proxy_time', 'proxy2server_time', 'server2proxy_time', 'proxy2client_time',
         'success', 'error'
     ]
     
@@ -931,6 +968,8 @@ def save_request_details(request_ids: List[int], outputs: List[RequestFuncOutput
             itl_str = ','.join(f'{x:.6f}' for x in output.itl)
             new_idx_str = ','.join(map(str, output.itl_new_token_index))
             total_idx_str = ','.join(map(str, output.itl_total_token_index))
+            server2proxy_time_str = ','.join(f'{x:.6f}' for x in output.server2proxy_time)
+            proxy2client_time_str = ','.join(f'{x:.6f}' for x in output.proxy2client_time)
             
             writer.writerow({
                 'request_id': req_id,
@@ -944,6 +983,10 @@ def save_request_details(request_ids: List[int], outputs: List[RequestFuncOutput
                 'itl_new_token_index': new_idx_str,
                 'itl_total_token_index': total_idx_str,
                 'preprocess_before_queue': f'{output.preprocess_before_queue:.6f}',
+                'client2proxy_time': f'{output.client2proxy_time}',
+                'proxy2server_time': f'{output.proxy2server_time}',
+                'server2proxy_time': server2proxy_time_str,
+                'proxy2client_time': proxy2client_time_str,
                 'success': output.success,
                 'error': output.error[:500]  # 限制错误信息长度
             })
@@ -969,7 +1012,7 @@ def check_chat_template(model_path):
 
 
 def run_benchmark(args_: argparse.Namespace):
-    global args
+    global args, session_pool
     args = args_
 
     # Set global environments
@@ -1077,35 +1120,44 @@ def run_benchmark(args_: argparse.Namespace):
     else:
         raise ValueError(f'Unknown dataset: {args.dataset_name}')
 
-    if not args.multi:
-        return asyncio.run(
-            benchmark(
-                backend=backend,
-                api_url=api_url,
-                model_id=model_id,
-                tokenizer=tokenizer,
-                input_requests=input_requests,
-                request_rate=args.request_rate,
-                disable_tqdm=args.disable_tqdm,
-                extra_request_body=extra_request_body,
-            ))
-    else:
-        # Benchmark multiple rps.
-        # TODO: use a fixed duration to compute num_prompts
-        request_rates = parse_request_rate_range(args.request_rate_range)
-
-        for rate in request_rates:
-            asyncio.run(
+    try:
+        if not args.multi:
+            return asyncio.run(
                 benchmark(
                     backend=backend,
                     api_url=api_url,
                     model_id=model_id,
                     tokenizer=tokenizer,
                     input_requests=input_requests,
-                    request_rate=rate,
+                    request_rate=args.request_rate,
                     disable_tqdm=args.disable_tqdm,
                     extra_request_body=extra_request_body,
                 ))
+        else:
+            # Benchmark multiple rps.
+            # TODO: use a fixed duration to compute num_prompts
+            request_rates = parse_request_rate_range(args.request_rate_range)
+
+            for rate in request_rates:
+                asyncio.run(
+                    benchmark(
+                        backend=backend,
+                        api_url=api_url,
+                        model_id=model_id,
+                        tokenizer=tokenizer,
+                        input_requests=input_requests,
+                        request_rate=rate,
+                        disable_tqdm=args.disable_tqdm,
+                        extra_request_body=extra_request_body,
+                    ))
+    finally:
+        # 在程序结束时关闭全局会话
+        if session_pool is not None:
+            # 创建一个新的事件循环来关闭会话
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(session_pool.close())
+            session_pool = None
 
 
 def set_ulimit(target_soft_limit=65535):
