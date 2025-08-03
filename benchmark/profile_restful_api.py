@@ -182,99 +182,84 @@ async def async_request_openai_completions(
 
     prompt = request_func_input.prompt
 
-    # async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-    payload = {
-        'model': request_func_input.model,
-        # 'prompt': prompt,
-        'temperature': 0.0,
-        'best_of': 1,
-        'max_tokens': request_func_input.output_len,
-        'stream': not args.disable_stream,
-        'ignore_eos': not args.disable_ignore_eos,
-        'input_ids': [len(request_func_input.input_ids)],
-        # 'input_ids': request_func_input.input_ids,
-        **request_func_input.extra_request_body,
-    }
-    # print(f"input_ids: {[len(request_func_input.input_ids)]}",flush=True)
-    headers = {'Authorization': f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
+    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+        payload = {
+            'model': request_func_input.model,
+            # 'prompt': prompt,
+            'temperature': 0.0,
+            'best_of': 1,
+            'max_tokens': request_func_input.output_len,
+            'stream': not args.disable_stream,
+            'ignore_eos': not args.disable_ignore_eos,
+            'input_ids': [len(request_func_input.input_ids)],
+            # 'input_ids': request_func_input.input_ids,
+            **request_func_input.extra_request_body,
+        }
+        # print(f"input_ids: {[len(request_func_input.input_ids)]}",flush=True)
+        headers = {'Authorization': f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
 
-    output = RequestFuncOutput()
-    output.prompt_len = request_func_input.prompt_len
+        output = RequestFuncOutput()
+        output.prompt_len = request_func_input.prompt_len
 
-    generated_text = ''
-    ttft = 0.0
-    has_count_ttft = False
-    st = time.perf_counter()
-    client_time = time.time()
-    itl = []
-    last_token_idx=0
-    most_recent_timestamp = st
-    try:
-        session = await get_session()
-        async with session.post(url=api_url, json=payload, headers=headers) as response:
-            if response.status == 200:
-                async for chunk_bytes in response.content:
-                    chunk_bytes = chunk_bytes.strip()
-                    if not chunk_bytes:
-                        continue
+        generated_text = ''
+        ttft = 0.0
+        has_count_ttft = False
+        st = time.perf_counter()
+        client_time = time.time()
+        itl = []
+        last_token_idx=0
+        most_recent_timestamp = st
+        try:
+            async with session.post(url=api_url, json=payload, headers=headers) as response:
+            # session = await get_session()
+            # async with session.post(url=api_url, json=payload, headers=headers) as response:
+                if response.status == 200:
+                    async for chunk_bytes in response.content:
+                        chunk_bytes = chunk_bytes.strip()
+                        if not chunk_bytes:
+                            continue
 
-                    chunk = remove_prefix(chunk_bytes.decode('utf-8'), 'data: ')
-                    latency = time.perf_counter() - st
-                    if chunk == '[DONE]':
-                        pass
-                    else:
-                        data = json.loads(chunk)
-
-                        # NOTE: Some completion API might have a last
-                        # usage summary response without a token so we
-                        # want to check a token was generated
-                        # if data['choices'][0]['text']:
-                        #     timestamp = time.perf_counter()
-                        #     # First token
-                        #     if ttft == 0.0:
-                        #         # print(f"TTFT data: {data}",flush=True)
-                        #         ttft = time.perf_counter() - st
-                        #         output.ttft = ttft
-
-                        #     # Decoding phase
-                        #     else:
-                        #         # print(f"TPOT data: {data}",flush=True)
-                        #         output.itl.append(timestamp - most_recent_timestamp)
-
-                        #     most_recent_timestamp = timestamp
-                        #     generated_text += data['choices'][0]['text']
-                        
-                        # 移除if判断，直接记录时间
-                        timestamp = time.perf_counter()
-                        # First token
-                        if has_count_ttft == False:
-                            # print(f"TTFT data: {data}", flush=True)
-                            ttft = time.perf_counter() - st
-                            output.ttft = 0
-                            output.queueing_latency = data['usage']['queued_time']
-                            output.preprocess_before_queue = data['usage']['preprocess_before_queue']
-                            output.itl.append(ttft)
-                            itl.append(ttft)
-                            most_recent_timestamp = timestamp
-                            has_count_ttft = True
-
-                            # client2proxy -> proxy2server -> server -> server2proxy -> proxy2client
-                            if data['usage']['completion_tokens'] and data['usage']['total_tokens']:
-                                output.itl_new_token_index.append(data['usage']['completion_tokens']-last_token_idx)
-                                output.itl_total_token_index.append(data['usage']['total_tokens'])
-                                last_token_idx = data['usage']['completion_tokens']
-                                output.client2proxy_time = data['usage']['proxy_recv_time'] - client_time
-                                output.proxy2server_time = data['usage']['server_recv_time'] - data['usage']['proxy_recv_time']
-                                output.server2proxy_time.append(data['usage']['proxy_send_time']-data['usage']['server_send_time'])
-                                output.proxy2client_time.append(time.time()-data['usage']['proxy_send_time'])
+                        chunk = remove_prefix(chunk_bytes.decode('utf-8'), 'data: ')
+                        latency = time.perf_counter() - st
+                        if chunk == '[DONE]':
+                            pass
                         else:
-                            if data['choices'][0]['text']:
-                                # print(f"TPOT data: {data}",flush=True)
-                                output.itl.append(timestamp - most_recent_timestamp)
-                                generated_text += data['choices'][0]['text']
-                                itl.append(timestamp - most_recent_timestamp)
-                                most_recent_timestamp = timestamp
+                            data = json.loads(chunk)
 
+                            # NOTE: Some completion API might have a last
+                            # usage summary response without a token so we
+                            # want to check a token was generated
+                            # if data['choices'][0]['text']:
+                            #     timestamp = time.perf_counter()
+                            #     # First token
+                            #     if ttft == 0.0:
+                            #         # print(f"TTFT data: {data}",flush=True)
+                            #         ttft = time.perf_counter() - st
+                            #         output.ttft = ttft
+
+                            #     # Decoding phase
+                            #     else:
+                            #         # print(f"TPOT data: {data}",flush=True)
+                            #         output.itl.append(timestamp - most_recent_timestamp)
+
+                            #     most_recent_timestamp = timestamp
+                            #     generated_text += data['choices'][0]['text']
+                            
+                            # 移除if判断，直接记录时间
+                            timestamp = time.perf_counter()
+                            # First token
+                            if has_count_ttft == False:
+                                # print(f"TTFT data: {data}", flush=True)
+                                ttft = time.perf_counter() - st
+                                output.ttft = 0
+                                output.queueing_latency = data['usage']['queued_time']
+                                output.preprocess_before_queue = data['usage']['preprocess_before_queue']
+                                output.itl.append(ttft)
+                                itl.append(ttft)
+                                most_recent_timestamp = timestamp
+                                has_count_ttft = True
+
+                                # client2proxy -> proxy2server -> server -> server2proxy -> proxy2client
                                 if data['usage']['completion_tokens'] and data['usage']['total_tokens']:
                                     output.itl_new_token_index.append(data['usage']['completion_tokens']-last_token_idx)
                                     output.itl_total_token_index.append(data['usage']['total_tokens'])
@@ -283,22 +268,38 @@ async def async_request_openai_completions(
                                     output.proxy2server_time = data['usage']['server_recv_time'] - data['usage']['proxy_recv_time']
                                     output.server2proxy_time.append(data['usage']['proxy_send_time']-data['usage']['server_send_time'])
                                     output.proxy2client_time.append(time.time()-data['usage']['proxy_send_time'])
+                            else:
+                                if data['choices'][0]['text']:
+                                    # print(f"TPOT data: {data}",flush=True)
+                                    output.itl.append(timestamp - most_recent_timestamp)
+                                    generated_text += data['choices'][0]['text']
+                                    itl.append(timestamp - most_recent_timestamp)
+                                    most_recent_timestamp = timestamp
 
-                        if data['usage'] and data['usage']['inference_time']:
-                            output.server_inference_time = data['usage']['inference_time']
+                                    if data['usage']['completion_tokens'] and data['usage']['total_tokens']:
+                                        output.itl_new_token_index.append(data['usage']['completion_tokens']-last_token_idx)
+                                        output.itl_total_token_index.append(data['usage']['total_tokens'])
+                                        last_token_idx = data['usage']['completion_tokens']
+                                        output.client2proxy_time = data['usage']['proxy_recv_time'] - client_time
+                                        output.proxy2server_time = data['usage']['server_recv_time'] - data['usage']['proxy_recv_time']
+                                        output.server2proxy_time.append(data['usage']['proxy_send_time']-data['usage']['server_send_time'])
+                                        output.proxy2client_time.append(time.time()-data['usage']['proxy_send_time'])
 
-                output.generated_text = generated_text
-                output.success = True
-                output.latency = latency
-                output.output_len = request_func_input.output_len
-                # print(f"Request itl: {itl}, latency: {latency}")
-            else:
-                output.error = response.reason or ''
-                output.success = False
-    except Exception:
-        output.success = False
-        exc_info = sys.exc_info()
-        output.error = ''.join(traceback.format_exception(*exc_info))
+                            if data['usage'] and data['usage']['inference_time']:
+                                output.server_inference_time = data['usage']['inference_time']
+
+                    output.generated_text = generated_text
+                    output.success = True
+                    output.latency = latency
+                    output.output_len = request_func_input.output_len
+                    # print(f"Request itl: {itl}, latency: {latency}")
+                else:
+                    output.error = response.reason or ''
+                    output.success = False
+        except Exception:
+            output.success = False
+            exc_info = sys.exc_info()
+            output.error = ''.join(traceback.format_exception(*exc_info))
 
     if pbar:
         pbar.update(1)
@@ -1112,7 +1113,7 @@ def run_benchmark(args_: argparse.Namespace):
         input_requests = sample_unbalance_requests(
             small_input_len=1024,
             small_output_len=400,
-            long_input_len=320000,
+            long_input_len=340000,
             long_output_len=100,
             num_prompts=args.num_prompts,
             long_ratio=0.002,

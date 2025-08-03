@@ -107,7 +107,6 @@ class NodeManager:
                     }
         self.heart_beat_thread = threading.Thread(target=heart_beat_controller, args=(self, ), daemon=True)
         self.heart_beat_thread.start()
-        self.aiotimeout = aiohttp.ClientTimeout(total=AIOHTTP_TIMEOUT)
 
         # For PD Disaggregation
         self.migration_protocol = MigrationProtocol[migration_protocol]
@@ -355,7 +354,7 @@ class NodeManager:
         if self.session_pool is None:
             async with self.pool_lock:
                 if self.session_pool is None:  # 双重检查
-                    self.connector = aiohttp.TCPConnector(limit=16384,limit_per_host=16384)
+                    self.connector = aiohttp.TCPConnector(limit=64,limit_per_host=0,keepalive_timeout=600)
                     self.session_pool = aiohttp.ClientSession(
                         connector=self.connector,
                         timeout=self.aiotimeout
@@ -374,46 +373,48 @@ class NodeManager:
         request['stream_options'] = {'include_usage': True}
         try:
             # 获取连接池中的会话
-            session = await self.get_session()
-            async with session.post(node_url + endpoint, json=request, timeout=self.aiotimeout) as response:
-                async for line in response.content:
-                    # print(f"output: {line}",flush=True)
-                    if line.startswith(b'data: '):
-                        line_str = line.decode('utf-8').strip()
-                        if line_str != 'data: [DONE]':
-                            try:
-                                data = json.loads(line[len(b'data: '):])
+            # session = await self.get_session()
+            # async with session.post(node_url + endpoint, json=request, timeout=self.aiotimeout) as response:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(node_url + endpoint, json=request, timeout=self.aiotimeout) as response:
+                    async for line in response.content:
+                        # print(f"output: {line}",flush=True)
+                        if line.startswith(b'data: '):
+                            line_str = line.decode('utf-8').strip()
+                            if line_str != 'data: [DONE]':
+                                try:
+                                    data = json.loads(line[len(b'data: '):])
 
-                                # print(f"data: {data}",flush=True)
-                                
-                                # 添加proxy相关时间字段
-                                # 确保usage字段存在
-                                if 'usage' not in data:
-                                    data['usage'] = {}
+                                    # print(f"data: {data}",flush=True)
+                                    
+                                    # 添加proxy相关时间字段
+                                    # 确保usage字段存在
+                                    if 'usage' not in data:
+                                        data['usage'] = {}
 
-                                # 添加proxy_send_time字段
-                                proxy_send_time = time.time()
-                                data['usage']['proxy_send_time'] = proxy_send_time
-                                
-                                # 当proxy_recv_time不为None时添加该字段
-                                if proxy_recv_time is not None:
-                                    data['usage']['proxy_recv_time'] = proxy_recv_time
+                                    # 添加proxy_send_time字段
+                                    proxy_send_time = time.time()
+                                    data['usage']['proxy_send_time'] = proxy_send_time
+                                    
+                                    # 当proxy_recv_time不为None时添加该字段
+                                    if proxy_recv_time is not None:
+                                        data['usage']['proxy_recv_time'] = proxy_recv_time
 
-                                # 将修改后的数据转换回字节
-                                modified_line = b'data: ' + json.dumps(data).encode('utf-8')
-                            except json.JSONDecodeError:
-                                logger.warning(f'Failed to parse JSON: {line}')
-                                modified_line = line  # 解析失败时使用原始行
+                                    # 将修改后的数据转换回字节
+                                    modified_line = b'data: ' + json.dumps(data).encode('utf-8')
+                                except json.JSONDecodeError:
+                                    logger.warning(f'Failed to parse JSON: {line}')
+                                    modified_line = line  # 解析失败时使用原始行
+                            else:
+                                modified_line = line  # 对于[DONE]消息不做修改
                         else:
-                            modified_line = line  # 对于[DONE]消息不做修改
-                    else:
-                        modified_line = line  # 非data行不做修改
+                            modified_line = line  # 非data行不做修改
 
-                    if modified_line.strip():
-                        yield modified_line + b'\n\n'
+                        if modified_line.strip():
+                            yield modified_line + b'\n\n'
 
-                    # if line.strip():
-                    #     yield line + b'\n\n'
+                        # if line.strip():
+                        #     yield line + b'\n\n'
 
         except (Exception, GeneratorExit, aiohttp.ClientError) as e:  # noqa
             logger.error(f'catched an exception: {e}')
