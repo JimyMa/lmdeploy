@@ -9,6 +9,7 @@ from os import getenv
 from typing import Any, Dict
 
 import torch
+import datetime
 import torch.distributed as dist
 from torch.profiler import ProfilerActivity, profile, record_function
 
@@ -481,6 +482,8 @@ class BaseModelAgent:
         self,
         inputs: ModelInputs,
         loop_count: int,
+        num_waiting: int,
+        kv_cache_usage: float,
         swap_in_map: Dict = None,
         swap_out_map: Dict = None,
         all_ids: torch.Tensor = None,
@@ -527,7 +530,9 @@ class BaseModelAgent:
 
             # gather dp forward metadata
             batch_size = inputs.seq_length.numel()
-            dp_forward_meta = [int(is_decoding), int(is_dummy), batch_size, int(sync_long_context)]
+
+            dp_forward_meta = [int(is_decoding), int(is_dummy), batch_size, int(sync_long_context), num_waiting, int(kv_cache_usage*10000)]
+
             # check enable_microbatch
             if self.enable_microbatch:
                 tokens_num = inputs.input_ids.numel()
@@ -554,6 +559,25 @@ class BaseModelAgent:
             if is_all_dummy:
                 return
 
+            # format easy to debug
+            # if rank == 0:  # 在 RANK0 上打印所有 RANK 的信息
+            #     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # 保留毫秒
+            #     log_message = f"Timestamp: {timestamp}\n"
+            #     log_message += "Rank\tBatch Size\tNum Waiting\tKV Cache Usage\n"
+            #     for i in range(dp):
+            #         batch_size = 0 if gathered_meta[i, 1] else gathered_meta[i, 2]
+            #         log_message += f"{i}\t{batch_size}\t{gathered_meta[i, 4]}\t{gathered_meta[i, 5]/10000:.3f}\n"
+            #     print(log_message,flush=True)
+            
+            # format easy to parse
+            if rank == 0:
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # 保留毫秒
+                log_message = f"Timestamp: {timestamp},Rank,Batch Size,Num Waiting,KV Cache Usage"
+                for i in range(dp):
+                    batch_size = 0 if gathered_meta[i, 1] else gathered_meta[i, 2]
+                    log_message += f",{i},{batch_size},{gathered_meta[i, 4]},{gathered_meta[i, 5]/10000:.3f}"
+                print(log_message, flush=True)
+
             if is_decoding:
                 all_batch_sizes = gathered_meta[:, 2]
                 padding_batch_size = all_batch_sizes.max().item()
@@ -566,7 +590,8 @@ class BaseModelAgent:
                 logger.debug(f'sync_long_context={sync_long_context}')
 
             # update if enable_microbatch
-            if self.enable_microbatch and gathered_meta[:, 4].all():
+            if self.enable_microbatch and gathered_meta[:, 6].all():
+            # if self.enable_microbatch and gathered_meta[:, 4].all():
                 inputs.enable_microbatch = True
 
             # update dp meta
@@ -977,6 +1002,8 @@ class DPForwardInputsMaker:
             loop_count=loop_count,
             is_dummy=True,
             sync_long_context=False,
+            num_waiting=0,
+            kv_cache_usage=0.00,
         )
         return forward_inputs
 

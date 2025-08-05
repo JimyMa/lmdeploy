@@ -618,10 +618,12 @@ class Engine:
     def model_config(self) -> ModelConfig:
         """Model config."""
         return self.executor.model_config
-    
-    def get_metrics(self):
-        kvcache_usage = self.scheduler.kvcache_usage()
+
+    def get_running(self):
         num_running = self.scheduler.num_running() + self.scheduler.num_locked()
+        return num_running
+
+    def get_waiting(self):
         
         # 提取各个组成部分
         num_waiting_base = self.scheduler.num_waiting()
@@ -634,11 +636,16 @@ class Engine:
         # 计算总和
         num_waiting = (num_waiting_base + num_to_be_migrated + num_migration_waiting +
                     num_migration_running + num_migration_locked + num_migration_done)
+
+        return num_waiting
+    
+    def get_metrics(self):
+        kvcache_usage = self.scheduler.kvcache_usage()
         
         return {
             "kvcache_usage": kvcache_usage,
-            "num_running": num_running,
-            "num_waiting": num_waiting
+            "num_running": self.get_running(),
+            "num_waiting": self.get_waiting()
         }
 
     @property
@@ -938,6 +945,8 @@ class Engine:
             return_logits=return_logits,
             is_dummy=False,
             sync_long_context=sync_long_context,
+            num_waiting=self.get_waiting(),
+            kv_cache_usage=self.scheduler.kvcache_usage()
         )
 
     async def _await_forward_event(self, forward_event: asyncio.Event):
@@ -1195,7 +1204,7 @@ class Engine:
                                         has_runable_event=has_runable_event,
                                         inputs_maker=inputs_maker)
         except Exception as e:
-            logger.error(f'exception happened: {type(e)} {e}')
+            logger.exception(f'exception happened: {type(e)} {e}')
         finally:
             self._loop_finally()
 

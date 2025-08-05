@@ -193,6 +193,8 @@ class Scheduler:
             # allocate session memory
             self.block_manager.allocate(seq,seq.sampling_param.max_new_tokens)
             _to_running(seq)
+
+            seq.record_event(EngineCoreEventType.SCHEDULED)
             
             # if not self.block_manager.can_allocate(seq,seq.sampling_param.max_new_tokens):
             #     if not self.running and not self.num_migration_running() and not self.num_migration_locked() and not self.num_migration_done() and not self.waiting and not self.locked:
