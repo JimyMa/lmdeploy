@@ -37,7 +37,7 @@ def parse_log_file(log_file):
                 )
             except ValueError:
                 continue
-                
+                 
             # 提取所有数据条目
             data_entries = data_pattern.findall(line)
             
@@ -155,13 +155,25 @@ def plot_metrics(output_dir, timestamps, batch_data, waiting_data, kv_cache_data
 
 def main():
     parser = argparse.ArgumentParser(description='Parse metrics from log file and generate plots.')
-    parser.add_argument('log_file', nargs='?', help='Path to the log file', default="/nvme4/share/chenjiefei/scripts/server/2p4d_decode_256_0.65_2025-08-05_06-52/dp32ep32_Decode_node0.log")
+    parser.add_argument('log_file', nargs='?', help='Path to the log file', default="/nvme4/share/chenjiefei/scripts/server/2p4d_decode_256_0.65_2025-08-05_07-33/dp32ep32_Decode_node0.log")
     parser.add_argument('output_dir', nargs='?', help='Directory to save the plots', default="/nvme4/share/chenjiefei/src/lmdeploy/plot")
-    
+    parser.add_argument('--delete_warmup_data', type=lambda x: (str(x).lower() == 'true'), default=True, help='Whether to delete the earliest data entry (warmup data)')
+
     args = parser.parse_args()
     
     # 解析日志文件
     timestamps, batch_data, waiting_data, kv_cache_data = parse_log_file(args.log_file)
+    
+    # 如果需要删除warmup数据，则删除时间最早的一条数据
+    if args.delete_warmup_data:
+        for rank in timestamps:
+            if timestamps[rank]:
+                earliest_timestamp = min(timestamps[rank])
+                earliest_index = timestamps[rank].index(earliest_timestamp)
+                timestamps[rank].pop(earliest_index)
+                batch_data[rank].pop(earliest_index)
+                waiting_data[rank].pop(earliest_index)
+                kv_cache_data[rank].pop(earliest_index)
     
     # 生成图表
     saved_files = plot_metrics(args.output_dir, timestamps, batch_data, waiting_data, kv_cache_data)
