@@ -1165,9 +1165,10 @@ async def startup_event():
     try:
         import requests
         engine_config = VariableInterface.async_engine.backend_config
+        dp_rank = VariableInterface.async_engine.backend_config.dp_rank
         engine_role = engine_config.role.value if hasattr(engine_config, 'role') else 1
         url = f'{VariableInterface.proxy_url}/nodes/add'
-        data = {'url': VariableInterface.api_server_url, 'status': {'models': get_model_list(), 'role': engine_role}}
+        data = {'url': VariableInterface.api_server_url, 'status': {'models': get_model_list(), 'role': engine_role,'dp_rank': dp_rank}}
         headers = {'accept': 'application/json', 'Content-Type': 'application/json'}
         response = requests.post(url, headers=headers, json=data)
 

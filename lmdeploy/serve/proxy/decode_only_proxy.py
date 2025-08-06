@@ -69,6 +69,7 @@ history_itl_count = 500
 class Status(BaseModel):
     """Status protocol consists of models' information."""
     role: EngineRole = EngineRole.Hybrid
+    dp_rank: Optional[int] = 0
     models: Optional[List[str]] = Field(default=[], examples=[[]])
     unfinished: int = 0
     latency: Deque = Field(default=deque(maxlen=LATENCY_DEQUE_LEN), examples=[[]])
@@ -296,6 +297,9 @@ class NodeManager:
         # if not has_active_node:
         #     return
 
+        # 将节点转换为列表并按dp_rank从小到大排序
+        sorted_nodes = sorted(decode_nodes.values(), key=lambda x: x.dp_rank)
+
         # 根据参数组合生成日志标题
         title_parts = []
         if print_kv_cache:
@@ -309,30 +313,31 @@ class NodeManager:
 
         logger.info(f"=== {' & '.join(title_parts)} Metrics ===")
 
-        # 遍历所有节点并输出指标
-        for index, (node_url, status) in enumerate(decode_nodes.items(), start=1):
-            log_items = [f'Node: {index}']
+        # 遍历排序后的节点并输出指标，使用dp_rank标识节点
+        for node in sorted_nodes:
+            # 使用节点的dp_rank代替索引
+            log_items = [f'Node: {node.dp_rank}']
 
             if print_kv_cache:
-                usage = status.kvcache_usage or 0
-                total_tokens = status.total_token_nums or 0
+                usage = node.kvcache_usage or 0
+                total_tokens = node.total_token_nums or 0
                 log_items.append(f'KV Cache Usage: {usage:.2f}, Total Tokens: {total_tokens}')
 
             if print_num_running:
-                num_running = status.num_running or 0
+                num_running = node.num_running or 0
                 log_items.append(f'Running Requests: {num_running}')
 
             if print_num_waiting:
-                num_waiting = status.num_waiting or 0
+                num_waiting = node.num_waiting or 0
                 log_items.append(f'Waiting Requests: {num_waiting}')
 
             if print_batch_size:
-                batch_size = status.unfinished or 0
+                batch_size = node.unfinished or 0
                 log_items.append(f'Batch Size: {batch_size}')
 
             if print_avg_tpot:
                 # 计算平均 history_itl (Tokens Per Output Token)
-                avg_history_itl = sum(status.history_itl) / len(status.history_itl) if status.history_itl else 0
+                avg_history_itl = sum(node.history_itl) / len(node.status.history_itl) if node.status.history_itl else 0
                 log_items.append(f'Avg TPOT: {avg_history_itl:.2f}')
 
             logger.info(', '.join(log_items))
