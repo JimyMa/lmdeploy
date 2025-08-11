@@ -30,6 +30,17 @@ from .logits_process import FusedLogitsProcessor, SamplingInputs
 
 logger = get_logger('lmdeploy')
 
+def next_power_of_2(n: int):
+    """Return the smallest power of 2 greater than or equal to n."""
+    n -= 1
+    n |= n >> 1
+    n |= n >> 2
+    n |= n >> 4
+    n |= n >> 8
+    n |= n >> 16
+    n |= n >> 32
+    n += 1
+    return n
 
 class AgentProfiler:
 
@@ -312,12 +323,13 @@ class BaseModelAgent:
         """warmup."""
         # TODO: disable for now, do not remove the comments.
 
-        # # warmup prefill
-        # with self.all_context():
-        #     inputs = ModelInputs.make_dummy(1, False, device='cuda')
-        #     self._forward_impl(inputs, swap_in_map=dict(), swap_out_map=dict())
-        #     inputs = ModelInputs.make_dummy(self.cache_config.max_batches, True, device='cuda')
-        #     self._forward_impl(inputs, swap_in_map=dict(), swap_out_map=dict())
+        bs_list = [1,2,4,8,16,32,64,128,256]
+
+        # warmup prefill
+        with self.all_context():
+            for bs in bs_list:
+                inputs = ModelInputs.make_dummy(bs, True, device='cuda')
+                self._forward_impl(inputs, swap_in_map=dict(), swap_out_map=dict())
 
     async def _async_model_forward(
         self,
@@ -559,14 +571,28 @@ class BaseModelAgent:
             if is_all_dummy:
                 return
 
-            # format easy to debug
+            # # 先算 global batch size
+            # global_batch_size = 0
+            # for i in range(dp):
+            #     batch_size = 0 if gathered_meta[i, 1] else gathered_meta[i, 2]
+            #     global_batch_size += batch_size
+
+            # # 计算当前 rank 该拿的 batch size
+            # base = global_batch_size // dp
+            # rem  = global_batch_size % dp
+            # batch_size_per_rank = base + (1 if rank < rem else 0)
+            # inputs.dummy_batch_size = next_power_of_2(max(batch_size_per_rank,1))
+
+            # logger.error(f"rank: {rank}, batch_size_per_rank: {batch_size_per_rank}")
+
+            # # format easy to debug
             # if rank == 0:  # 在 RANK0 上打印所有 RANK 的信息
             #     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # 保留毫秒
             #     log_message = f"Timestamp: {timestamp}\n"
-            #     log_message += "Rank\tBatch Size\tNum Waiting\tKV Cache Usage\n"
+            #     log_message += "Rank\tBatch Size\tNum Waiting\tKV Cache Usage\tis_dummy\n"
             #     for i in range(dp):
             #         batch_size = 0 if gathered_meta[i, 1] else gathered_meta[i, 2]
-            #         log_message += f"{i}\t{batch_size}\t{gathered_meta[i, 4]}\t{gathered_meta[i, 5]/10000:.3f}\n"
+            #         log_message += f"{i}\t{batch_size}\t{gathered_meta[i, 4]}\t{gathered_meta[i, 5]/10000:.3f}\t{gathered_meta[i, 1]}\n"
             #     print(log_message,flush=True)
             
             # format easy to parse
@@ -581,9 +607,9 @@ class BaseModelAgent:
             if is_decoding:
                 all_batch_sizes = gathered_meta[:, 2]
                 padding_batch_size = all_batch_sizes.max().item()
-                meta = self.patched_model.get_meta()
-                meta.padding_batch_size = padding_batch_size
-                logger.debug(f'padding_batch_size={padding_batch_size}')
+                # meta = self.patched_model.get_meta()
+                # meta.padding_batch_size = padding_batch_size
+                # logger.error(f'rank={rank}, padding_batch_size={padding_batch_size}, batch size={batch_size}')
             else:
                 all_sync_flags = gathered_meta[:, 3].bool()
                 sync_long_context = all_sync_flags.any()
@@ -596,7 +622,7 @@ class BaseModelAgent:
 
             # update dp meta
             inputs.build_dp_meta()
-            inputs = self.patched_model.update_inputs(inputs)
+            # inputs = self.patched_model.update_inputs(inputs)
 
         # dist tools
         dist_ctx = get_dist_manager().current_context()
