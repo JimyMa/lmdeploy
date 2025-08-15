@@ -80,7 +80,13 @@ with set_envs():
     # executor
     executor_backend = os.getenv('LMDEPLOY_EXECUTOR_BACKEND', None)
 
-    # torch profiler
+    # torch profiler 4 min
+    # torch_profile_cpu = True
+    # torch_profile_cuda = True
+    # torch_profile_delay = 150
+    # torch_profile_duration = 30
+    # torch_profile_output_prefix = "/nvme2/share/root/scripts/lmdeploy_torch_profiler/input_320000_"
+
     torch_profile_cpu = env_to_bool('LMDEPLOY_PROFILE_CPU', False)
     torch_profile_cuda = env_to_bool('LMDEPLOY_PROFILE_CUDA', False)
     torch_profile_delay = env_to_int('LMDEPLOY_PROFILE_DELAY', 0)
