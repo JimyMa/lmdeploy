@@ -516,6 +516,56 @@ def sample_unbalance_requests(small_input_len: int, small_output_len: int,
     
     return result
 
+def sample_mix_datasets_requests(
+    long_dataset_path: str = "/nvme4/share/chenjiefei/dataset/filtered_medha/gemini_issues_processed_data.json",
+    short_dataset_path: str = "/nvme4/share/chenjiefei/dataset/tokenized_sharegpt/sharegpt_data_filtered.json",
+    total_requests: int = 10000,
+    long_ratio: float = 0.01  # 1%的长请求比例
+) -> List[Tuple[str, int, int]]:
+    """
+    混合长输入数据集和短输入数据集，按照指定比例生成请求列表
+    
+    参数:
+        long_dataset_path: 长输入数据集的路径
+        short_dataset_path: 短输入数据集的路径
+        total_requests: 总共生成的请求数量
+        long_ratio: 长请求的比例
+        
+    返回:
+        包含请求信息的列表，每个元素为('', prompt_len, output_len)元组
+    """
+    # 读取长输入数据集
+    with open(long_dataset_path, 'r', encoding='utf-8') as f:
+        long_dataset = json.load(f)
+    
+    # 读取短输入数据集
+    with open(short_dataset_path, 'r', encoding='utf-8') as f:
+        short_dataset = json.load(f)
+    
+    result: List[Tuple[str, int, int]] = []
+    long_interval = round(1 / long_ratio)  # 计算长请求之间的间隔
+    long_counter = 0  # 用于跟踪下一个长请求的位置
+    long_idx = 0  # 长数据集索引
+    short_idx = 0  # 短数据集索引
+    long_len = len(long_dataset)
+    short_len = len(short_dataset)
+    
+    for i in range(total_requests):
+        if long_counter == 0:
+            # 插入长请求，循环使用长数据集
+            data = long_dataset[long_idx % long_len]
+            result.append(('', data['prompt_len'], data['output_len']))
+            long_idx += 1
+            long_counter = long_interval - 1
+        else:
+            # 插入短请求，循环使用短数据集
+            data = short_dataset[short_idx % short_len]
+            result.append(('', data['prompt_len'], data['output_len']))
+            short_idx += 1
+            long_counter -= 1
+    
+    return result
+
 def sample_sharegpt_requests(
     dataset_path: str,
     num_requests: int,
@@ -1123,6 +1173,13 @@ def run_benchmark(args_: argparse.Namespace):
             num_prompts=args.num_prompts,
             long_ratio=0.002,
         )
+    elif args.dataset_name == 'mix_datasets':
+        input_requests = sample_mix_datasets_requests(
+            long_dataset_path="/nvme4/share/chenjiefei/dataset/filtered_medha/gemini_issues_processed_data.json",
+            short_dataset_path="/nvme4/share/chenjiefei/dataset/tokenized_sharegpt/sharegpt_data_filtered.json",
+            num_prompts=args.num_prompts,
+            long_ratio=0.01,
+        )
     else:
         raise ValueError(f'Unknown dataset: {args.dataset_name}')
 
@@ -1203,7 +1260,7 @@ if __name__ == '__main__':
         '--dataset-name',
         type=str,
         default='sharegpt',
-        choices=['sharegpt', 'random', 'unbalance'],
+        choices=['sharegpt', 'random', 'unbalance', 'mix_datasets'],
         help='Name of the dataset to benchmark on.',
     )
     parser.add_argument('--dataset-path', type=str, default='', help='Path to the dataset.')
