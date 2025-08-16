@@ -494,20 +494,25 @@ def download_and_cache_file(url: str, filename: Optional[str] = None):
 
     return filename
 
-def sample_unbalance_requests(small_input_len, small_output_len, long_input_len, long_output_len, num_prompts, long_ratio):
+from typing import List, Tuple
+
+def sample_unbalance_requests(small_input_len: int, small_output_len: int, 
+                            long_input_len: int, long_output_len: int, 
+                            num_prompts: int, long_ratio: float) -> List[Tuple[str, int, int]]:
     
     result: List[Tuple[str, int, int]] = []
-    current = 0.0  # 用于累积长请求比例的计数器
+    long_interval = round(1 / long_ratio)  # 计算长请求之间的间隔
+    long_counter = 0  # 用于跟踪下一个长请求的位置
     
-    for _ in range(num_prompts):
-        current += long_ratio
-        if current >= 1.0:
-            # 插入长请求并重置计数器
+    for i in range(num_prompts):
+        if long_counter == 0:
+            # 插入长请求
             result.append(('', long_input_len, long_output_len))
-            current -= 1.0
+            long_counter = long_interval - 1
         else:
             # 插入短请求
             result.append(('', small_input_len, small_output_len))
+            long_counter -= 1
     
     return result
 
@@ -1111,10 +1116,10 @@ def run_benchmark(args_: argparse.Namespace):
         )
     elif args.dataset_name == 'unbalance':
         input_requests = sample_unbalance_requests(
-            small_input_len=1024,
-            small_output_len=400,
+            small_input_len=512,
+            small_output_len=800,
             long_input_len=340000,
-            long_output_len=100,
+            long_output_len=200,
             num_prompts=args.num_prompts,
             long_ratio=0.002,
         )
