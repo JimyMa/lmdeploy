@@ -23,6 +23,9 @@ from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
 from .utils.cudagraph import CudaGraphMixin
 
+from lmdeploy.utils import get_logger
+
+logger = get_logger('lmdeploy')
 
 # microbatch
 class ExecType(Enum):
@@ -729,8 +732,12 @@ class DeepseekV2MoE(nn.Module):
         else:
             self._all_reduce = False
 
-    def forward(self, hidden_states: torch.Tensor):
+    def forward(self, hidden_states: torch.Tensor, dummy_batch_size: Optional[int] = None):
         """forward."""
+
+        # logger.error(f"RANK{torch.distributed.get_rank()} dummy_batch_size: {dummy_batch_size}")
+        # logger.error(f"RANK{torch.distributed.get_rank()}: forward: hidden_states.shape: {hidden_states.shape}, hidden_states.dtype: {hidden_states.dtype}, hidden_states.device: {hidden_states.device}")
+
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         topk_weights, topk_ids = self.gate(hidden_states)
@@ -753,7 +760,87 @@ class DeepseekV2MoE(nn.Module):
         if self._all_reduce:
             dist.all_reduce(out_states)
 
+        # logger.error(f"RANK{torch.distributed.get_rank()}: forward: out_states.shape: {out_states.shape}, out_states.dtype: {out_states.dtype}, out_states.device: {out_states.device}")
+
         return out_states
+            
+    # used for dummy batch size balance
+    # def forward(self, hidden_states: torch.Tensor, dummy_batch_size: Optional[int] = None):
+    #     """forward."""
+    #     # logger.error(f"Before: RANK{torch.distributed.get_rank()}: forward: hidden_states.shape: {hidden_states.shape}, hidden_states.dtype: {hidden_states.dtype}, hidden_states.device: {hidden_states.device}")
+        
+    #     logger.error(f"RANK{torch.distributed.get_rank()} dummy_batch_size: {dummy_batch_size}")
+        
+    #     if dummy_batch_size is not None and dummy_batch_size != -1:
+    #         # 获取原始张量的形状信息
+    #         origin_batch_size, origin_sequence_length, hidden_dim = hidden_states.shape
+    #         # 创建新的张量，保持第一维和第三维不变，第二维改为dummy_batch_size
+    #         dummy_hidden_states = torch.empty(
+    #             (origin_batch_size, dummy_batch_size, hidden_dim),
+    #             dtype=torch.bfloat16,
+    #             device=hidden_states.device
+    #         )
+
+    #         # 为输出状态创建相同形状的张量
+    #         dummy_output_states = torch.empty(
+    #             (origin_batch_size, origin_sequence_length, hidden_dim),
+    #             dtype=torch.bfloat16,
+    #             device=hidden_states.device
+    #         )
+
+    #         batch_size, sequence_length, hidden_dim = dummy_hidden_states.shape
+    #         dummy_hidden_states = dummy_hidden_states.view(-1, hidden_dim)
+    #         topk_weights, topk_ids = self.gate(dummy_hidden_states)
+
+    #         if True:
+    #             ranks = torch.distributed.get_world_size()
+    #             topk_ids = compute_topk_ids(topk_ids, ranks, self.num_experts)
+
+    #         # logger.error(f"RANK{torch.distributed.get_rank()}: origin_sequence_length: {origin_sequence_length}, sequence_length: {sequence_length}, dummy_hidden_states.shape: {dummy_hidden_states.shape}, topk_ids.shape: {topk_ids.shape}")
+
+    #         out_states = self.experts(
+    #             dummy_hidden_states,
+    #             topk_weights,
+    #             topk_ids,
+    #         )
+
+    #         if self.shared_experts is not None:
+    #             shared_states = self.shared_experts(dummy_hidden_states)
+    #             out_states += shared_states
+    #         out_states = out_states.reshape(batch_size, sequence_length, -1)
+
+    #         if self._all_reduce:
+    #             dist.all_reduce(out_states)
+            
+    #         return dummy_output_states
+        
+    #     else:
+
+    #         logger.error(f"dummy_batch_size is None or dummy_batch_size == -1")
+
+    #         batch_size, sequence_length, hidden_dim = hidden_states.shape
+    #         hidden_states = hidden_states.view(-1, hidden_dim)
+    #         topk_weights, topk_ids = self.gate(hidden_states)
+
+    #         if True:
+    #             ranks = torch.distributed.get_world_size()
+    #             topk_ids = compute_topk_ids(topk_ids, ranks, self.num_experts)
+
+    #         out_states = self.experts(
+    #             hidden_states,
+    #             topk_weights,
+    #             topk_ids,
+    #         )
+
+    #         if self.shared_experts is not None:
+    #             shared_states = self.shared_experts(hidden_states)
+    #             out_states += shared_states
+    #         out_states = out_states.reshape(batch_size, sequence_length, -1)
+
+    #         if self._all_reduce:
+    #             dist.all_reduce(out_states)
+
+    #         return out_states
 
 
 class DeepseekV2MLP(nn.Module):
@@ -811,7 +898,7 @@ class DeepseekV2MLP(nn.Module):
             all_reduce=all_reduce,
         )
 
-    def forward(self, x):
+    def forward(self, x, dummy_batch_size: Optional[int] = None):
         """forward."""
         gate_up = self.gate_up_proj(x)
         act = self.act_fn(gate_up)
@@ -856,6 +943,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         past_key_value: Optional[List[torch.FloatTensor]],
         residual: Optional[torch.Tensor] = None,
         attn_metadata: Any = None,
+        dummy_batch_size: Optional[int] = None
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
 
         if residual is None:
@@ -874,7 +962,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, dummy_batch_size)
 
         outputs = (hidden_states, residual)
         return outputs
@@ -1031,6 +1119,7 @@ class DeepseekV2Model(nn.Module):
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         attn_metadata: Any = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        dummy_batch_size: Optional[int] = None,
     ):
         """forward."""
         if inputs_embeds is None:
@@ -1049,6 +1138,7 @@ class DeepseekV2Model(nn.Module):
                 past_key_value=past_key_value,
                 residual=residual,
                 attn_metadata=attn_metadata,
+                dummy_batch_size=dummy_batch_size,
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -1163,6 +1253,7 @@ class DeepseekV2ForCausalLM(nn.Module, CudaGraphMixin):
         past_key_values: List[List[torch.Tensor]],
         attn_metadata: Any = None,
         inputs_embeds: torch.Tensor = None,
+        dummy_batch_size: Optional[int] = None,
         **kwargs,
     ):
         if get_step_ctx_manager().current_context().enable_microbatch:
@@ -1180,6 +1271,7 @@ class DeepseekV2ForCausalLM(nn.Module, CudaGraphMixin):
                 past_key_values=past_key_values,
                 attn_metadata=attn_metadata,
                 inputs_embeds=inputs_embeds,
+                dummy_batch_size=dummy_batch_size,
             )
         return hidden_states
 
@@ -1208,6 +1300,7 @@ class DeepseekV2ForCausalLM(nn.Module, CudaGraphMixin):
             past_key_values=past_key_values,
             attn_metadata=attn_metadata,
             inputs_embeds=inputs_embeds,
+            dummy_batch_size=context.dummy_batch_size
         )
 
     def _load_weight_experts(self, name: str, loaded_weight: torch.Tensor, params_dict: Dict[str, nn.Parameter],

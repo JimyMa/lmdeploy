@@ -12,6 +12,9 @@ from lmdeploy.pytorch.backends import get_backend
 from lmdeploy.pytorch.config import ModelConfig
 from lmdeploy.pytorch.multimodal.data_type import MultiModalTensor
 
+from lmdeploy.utils import get_logger
+
+logger = get_logger('lmdeploy')
 
 @dataclass
 class DPMeta:
@@ -138,6 +141,7 @@ class ModelInputs:
     model_metas: List[Dict[str, Any]] = None
     dp_meta: 'DPMeta' = None
     enable_microbatch: bool = False
+    dummy_batch_size: int = -1
 
     def update(self, input_ids: torch.LongTensor):
         """Update input ids."""
@@ -329,6 +333,7 @@ class StepContext:
     model_metas: List[Dict[str, Any]] = None
     dp_meta: DPMeta = None
     enable_microbatch: bool = False
+    dummy_batch_size: int = -1
 
     _outputs: Dict = field(default_factory=dict)
 
@@ -406,6 +411,7 @@ class StepContext:
             cross_kv_seqlens=cross_kv_seqlens,
             dp_meta=inputs.dp_meta,
             enable_microbatch=inputs.enable_microbatch,
+            dummy_batch_size=inputs.dummy_batch_size
         )
 
         ret = get_backend().update_step_context(ret)

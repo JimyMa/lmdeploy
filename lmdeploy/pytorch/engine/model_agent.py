@@ -571,19 +571,25 @@ class BaseModelAgent:
             if is_all_dummy:
                 return
 
-            # # 先算 global batch size
-            # global_batch_size = 0
-            # for i in range(dp):
-            #     batch_size = 0 if gathered_meta[i, 1] else gathered_meta[i, 2]
-            #     global_batch_size += batch_size
+            # 先算 global batch size
+            global_batch_size = 0
+            max_batch_size = 0
+            for i in range(dp):
+                batch_size = 0 if gathered_meta[i, 1] else gathered_meta[i, 2]
+                global_batch_size += batch_size
+                max_batch_size = max(max_batch_size,batch_size)
 
-            # # 计算当前 rank 该拿的 batch size
-            # base = global_batch_size // dp
-            # rem  = global_batch_size % dp
-            # batch_size_per_rank = base + (1 if rank < rem else 0)
-            # inputs.dummy_batch_size = next_power_of_2(max(batch_size_per_rank,1))
+            # 计算当前 rank 该拿的 batch size
+            base = global_batch_size // dp
+            rem  = global_batch_size % dp
+            batch_size_per_rank = base + (1 if rank < rem else 0)
+            inputs.dummy_batch_size = max(batch_size_per_rank,1)
 
-            # logger.error(f"rank: {rank}, batch_size_per_rank: {batch_size_per_rank}")
+            current_rank = torch.distributed.get_rank()
+            if current_rank == 0:
+                logger.error(f"RANK{current_rank} rebalance_batch_size: {max(batch_size_per_rank,1)}, max_batch_size: {max_batch_size}")
+
+            # logger.error(f"rank: {rank}, batch_size_per_rank: {max(batch_size_per_rank,1)}")
 
             # # format easy to debug
             # if rank == 0:  # 在 RANK0 上打印所有 RANK 的信息
