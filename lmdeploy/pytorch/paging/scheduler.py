@@ -107,6 +107,18 @@ class Scheduler:
         """
         usage = self.block_manager.get_usage()
         return usage
+    
+    def get_num_free_gpu_blocks(self):
+        return self.block_manager.get_num_free_gpu_blocks()
+    
+    def get_num_blocks_first_waiting_request(self):
+        return self.block_manager.num_required_blocks(self.waiting_migration[0], self.waiting_migration[0].sampling_param.max_new_tokens) if len(self.waiting_migration) > 0 else 0
+
+    def get_num_blocks_all_waiting_requests(self):
+        num_blocks_all_waiting_requests = 0
+        for i in range(len(self.waiting_migration)):
+            num_blocks_all_waiting_requests += self.block_manager.num_required_blocks(self.waiting_migration[i], self.waiting_migration[i].sampling_param.max_new_tokens)
+        return num_blocks_all_waiting_requests
 
     def build_eviction_helper(self, eviction_type: str):
         if eviction_type == 'copy':

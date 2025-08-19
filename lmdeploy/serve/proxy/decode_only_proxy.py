@@ -79,6 +79,9 @@ class Status(BaseModel):
     num_waiting: Optional[int] = 0
     total_token_nums: Optional[int] = 0
     history_itl: Deque[int] = deque(maxlen=history_itl_count)
+    free_blocks: Optional[int] = 0
+    wait_first_block: Optional[int] = 0
+    wait_num_block: Optional[int] = 0
 
 class Node(BaseModel):
     """Node protocol consists of url and status."""
@@ -259,6 +262,9 @@ class NodeManager:
                     status.kvcache_usage = metrics.get('kvcache_usage', 0)
                     status.num_waiting = metrics.get('num_waiting', 0)
                     status.num_running = metrics.get('num_running', 0)
+                    status.free_blocks = metrics.get('free_blocks', 0)
+                    status.wait_first_block = metrics.get('wait_first_block', 0)
+                    status.wait_num_block = metrics.get('wait_num_block', 0)
                     self.nodes[node_url] = status
 
     def shutdown(self):
@@ -277,11 +283,13 @@ class NodeManager:
             time.sleep(self.log_interval)
             self._log_metrics()
 
-    def _log_metrics(self, print_kv_cache: bool = True, print_batch_size: bool = False, 
-                    print_avg_tpot: bool = False, print_num_running: bool = True, print_num_waiting: bool = True):
-        """打印节点指标日志（增加num_running指标的打印）"""
+    def _log_metrics(self, print_kv_cache: bool = True, print_batch_size: bool = True, 
+                print_avg_tpot: bool = False, print_num_running: bool = True, print_num_waiting: bool = True,
+                print_free_blocks: bool = True, print_wait_first_block: bool = True, print_wait_num_block: bool = True):
+        """打印节点指标日志（增加free_blocks、wait_first_block、wait_num_block指标的支持）"""
         # 若所有参数均为 False，则不打印任何内容
-        if not any([print_kv_cache, print_batch_size, print_avg_tpot, print_num_running]):
+        if not any([print_kv_cache, print_batch_size, print_avg_tpot, print_num_running, 
+                    print_num_waiting, print_free_blocks, print_wait_first_block, print_wait_num_block]):
             return
 
         # 获取所有解码节点
@@ -289,13 +297,6 @@ class NodeManager:
         if not decode_nodes:
             logger.info('No decode nodes available')
             return
-
-        # # 检查是否存在至少一个节点的batch size >= 1
-        # has_active_node = any((status.unfinished or 0) >= 1 for _, status in decode_nodes.items())
-
-        # # 如果不存在任何活跃节点，则不打印任何节点的日志
-        # if not has_active_node:
-        #     return
 
         # 将节点转换为列表并按dp_rank从小到大排序
         sorted_nodes = sorted(decode_nodes.values(), key=lambda x: x.dp_rank)
@@ -310,6 +311,14 @@ class NodeManager:
             title_parts.append('Avg TPOT')
         if print_num_running:
             title_parts.append('Running Requests')
+        if print_num_waiting:
+            title_parts.append('Waiting Requests')
+        if print_free_blocks:
+            title_parts.append('Free Blocks')
+        if print_wait_first_block:
+            title_parts.append('Wait First Block')
+        if print_wait_num_block:
+            title_parts.append('Wait Num Block')
 
         logger.info(f"=== {' & '.join(title_parts)} Metrics ===")
 
@@ -337,8 +346,20 @@ class NodeManager:
 
             if print_avg_tpot:
                 # 计算平均 history_itl (Tokens Per Output Token)
-                avg_history_itl = sum(node.history_itl) / len(node.status.history_itl) if node.status.history_itl else 0
+                avg_history_itl = sum(node.history_itl) / len(node.history_itl) if node.history_itl else 0
                 log_items.append(f'Avg TPOT: {avg_history_itl:.2f}')
+
+            if print_free_blocks:
+                free_blocks = node.free_blocks or 0
+                log_items.append(f'Free Blocks: {free_blocks}')
+
+            if print_wait_first_block:
+                wait_first_block = node.wait_first_block or 0
+                log_items.append(f'Wait First Block: {wait_first_block}')
+
+            if print_wait_num_block:
+                wait_num_block = node.wait_num_block or 0
+                log_items.append(f'Wait Num Block: {wait_num_block}')
 
             logger.info(', '.join(log_items))
 
@@ -558,6 +579,10 @@ class NodeManager:
                 current_index = self.prefill_index
                 self.prefill_index = (self.prefill_index + 1) % len(matched_nodes)
             elif role == EngineRole.Decode:
+                # if prefill_length > 1024:
+                #     current_index = 0
+                # else:
+                #     current_index = 1
                 current_index = self.decode_index
                 self.decode_index = (self.decode_index + 1) % len(matched_nodes)
             else:

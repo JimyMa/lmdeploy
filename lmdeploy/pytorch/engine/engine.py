@@ -641,11 +641,17 @@ class Engine:
     
     def get_metrics(self):
         kvcache_usage = self.scheduler.kvcache_usage()
-        
+        free_gpu_blocks = self.scheduler.get_num_free_gpu_blocks()
+        num_blocks_first_waiting_request = self.scheduler.get_num_blocks_first_waiting_request()
+        get_num_blocks_all_waiting_requests = self.scheduler.get_num_blocks_all_waiting_requests()
+
         return {
             "kvcache_usage": kvcache_usage,
             "num_running": self.get_running(),
-            "num_waiting": self.get_waiting()
+            "num_waiting": self.get_waiting(),
+            "free_blocks": free_gpu_blocks,
+            "wait_first_block": num_blocks_first_waiting_request,
+            "wait_num_block": get_num_blocks_all_waiting_requests
         }
 
     @property
