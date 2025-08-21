@@ -22,17 +22,17 @@ def main():
             output_len = item.get("output_len", 0)
 
             # 判断条件
-            if output_len + 300 >= 350:
+            if output_len + 400 >= 450:
 
-                if output_len < 350 and prompt_len + output_len + 300 < 4096:
+                if output_len < 450 and prompt_len + output_len + 350 < 8192:
                     filtered.append({
                         "prompt_len": prompt_len,
-                        "output_len": output_len + 300
+                        "output_len": output_len + 400
                     })
-                if output_len >= 350 and prompt_len + output_len < 4096:
+                if output_len >= 450 and prompt_len + output_len + 100 < 8192:
                     filtered.append({
                         "prompt_len": prompt_len,
-                        "output_len": output_len
+                        "output_len": output_len + 100
                     })
                 
         random.shuffle(filtered)
