@@ -4,8 +4,9 @@ from collections import defaultdict
 from datetime import datetime
 import matplotlib.pyplot as plt
 import numpy as np
+import argparse
 
-def parse_log_and_plot(log_file_path, num_ranks, save_folder, show_instance_legend=False):
+def parse_log_and_plot(log_file_path, num_ranks, save_folder, time_interval=9.5, skip_head=0, skip_tail=0, show_instance_legend=False):
     # 确保保存文件夹存在
     if not os.path.exists(save_folder):
         os.makedirs(save_folder)
@@ -50,8 +51,9 @@ def parse_log_and_plot(log_file_path, num_ranks, save_folder, show_instance_lege
     wait_first_block_data = defaultdict(list)  # key: rank, value: list of values for each timestamp
     wait_num_block_data = defaultdict(list)    # key: rank, value: list of values for each timestamp
     
-    # 存储所有时间戳
-    all_timestamps = []
+    # 存储所有时间戳字符串和对应的datetime对象
+    all_timestamp_strings = []
+    all_timestamp_objects = []
 
     # 函数解析时间戳字符串为datetime对象
     def parse_timestamp(ts_str):
@@ -75,13 +77,30 @@ def parse_log_and_plot(log_file_path, num_ranks, save_folder, show_instance_lege
     # 获取所有有效时间戳并排序
     sorted_timestamps = sorted(valid_timestamps.keys(), key=lambda x: parse_timestamp(x))
     
+    # 存储原始时间戳对象
+    original_timestamp_objects = [parse_timestamp(ts) for ts in sorted_timestamps]
+    
+    # 应用skip_head和skip_tail
+    if skip_head > 0:
+        sorted_timestamps = sorted_timestamps[skip_head:]
+        original_timestamp_objects = original_timestamp_objects[skip_head:]
+    if skip_tail > 0 and len(sorted_timestamps) > skip_tail:
+        sorted_timestamps = sorted_timestamps[:-skip_tail]
+        original_timestamp_objects = original_timestamp_objects[:-skip_tail]
+    
+    # 如果没有剩余时间戳，则退出
+    if not sorted_timestamps:
+        print(f"No timestamps remaining after skipping head ({skip_head}) and tail ({skip_tail}).")
+        return
+    
     # 提取每个有效时间戳下的指标数据
     for ts_str in sorted_timestamps:
         node_lines = valid_timestamps[ts_str]
         total_free_blocks = 0
         
         # 记录时间戳
-        all_timestamps.append(ts_str)
+        all_timestamp_strings.append(ts_str)
+        all_timestamp_objects.append(parse_timestamp(ts_str))
         
         for line in node_lines:
             # 提取RANK
@@ -110,15 +129,27 @@ def parse_log_and_plot(log_file_path, num_ranks, save_folder, show_instance_lege
         
         free_blocks_total.append(total_free_blocks)
 
-    # 获取第一个时间戳用于计算相对时间
-    first_timestamp = parse_timestamp(sorted_timestamps[0])
-    
-    # 计算相对时间（秒）
-    relative_times = []
-    for ts_str in sorted_timestamps:
-        ts_dt = parse_timestamp(ts_str)
-        sec_from_start = (ts_dt - first_timestamp).total_seconds()
-        relative_times.append(sec_from_start)
+    # 打印free blocks信息
+    if free_blocks_total:
+        max_free_blocks = max(free_blocks_total)
+        total_records = len(free_blocks_total)
+        print(f"Free Blocks - Max value: {max_free_blocks}, Total records: {total_records}")
+    else:
+        print("No free blocks data found")
+        return
+
+    # 计算相对时间（秒），以第一个保留的时间戳为起点
+    if all_timestamp_objects:
+        first_timestamp_after_skip = all_timestamp_objects[0]
+        relative_times = []
+        for ts_dt in all_timestamp_objects:
+            sec_from_start = (ts_dt - first_timestamp_after_skip).total_seconds()
+            relative_times.append(sec_from_start)
+        
+        print(f"Time range after skipping: {relative_times[0]:.1f}s to {relative_times[-1]:.1f}s")
+    else:
+        print("No timestamps available after skipping")
+        return
 
     # 准备堆叠柱状图数据
     wait_first_stacked = []
@@ -161,8 +192,8 @@ def parse_log_and_plot(log_file_path, num_ranks, save_folder, show_instance_lege
                color=colors[i], width=5, label=label, alpha=0.7, zorder=1)
         bottom += wait_first_block_data[rank]
     
-    # 绘制Free Blocks折线（使用较高的zorder确保在顶层）
-    ax.plot(relative_times, free_blocks_total, 'b-', linewidth=3, label='Total Free Blocks', zorder=2)
+    # 绘制Free Blocks折线（使用较高的zorder确保在顶层，使用虚线，统一线宽为3）
+    ax.plot(relative_times, free_blocks_total, 'b--', linewidth=3, label='Total Free Blocks', zorder=2)
     
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('Num of Blocks')
@@ -183,7 +214,7 @@ def parse_log_and_plot(log_file_path, num_ranks, save_folder, show_instance_lege
         if line_handle:
             ax.legend([line_handle], ['Total Free Blocks'], loc='upper left')
     
-    plt.title('Free Blocks and Wait First Block Over Time')
+    plt.title(f'Free Blocks and Wait First Block Over Time\n(Skipped head: {skip_head}, tail: {skip_tail})')
     plt.grid(True)
     plt.tight_layout()
     plt.savefig(first_plot_path, dpi=300, bbox_inches='tight')
@@ -205,8 +236,8 @@ def parse_log_and_plot(log_file_path, num_ranks, save_folder, show_instance_lege
                color=colors[i], width=5, label=label, alpha=0.7, zorder=1)
         bottom += wait_num_block_data[rank]
     
-    # 绘制Free Blocks折线（使用较高的zorder确保在顶层）
-    ax.plot(relative_times, free_blocks_total, 'b-', linewidth=2, label='Total Free Blocks', zorder=2)
+    # 绘制Free Blocks折线（使用较高的zorder确保在顶层，使用虚线，统一线宽为3）
+    ax.plot(relative_times, free_blocks_total, 'b--', linewidth=3, label='Total Free Blocks', zorder=2)
     
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('Num of Blocks')
@@ -227,7 +258,7 @@ def parse_log_and_plot(log_file_path, num_ranks, save_folder, show_instance_lege
         if line_handle:
             ax.legend([line_handle], ['Total Free Blocks'], loc='upper left')
     
-    plt.title('Free Blocks and Wait Num Block Over Time')
+    plt.title(f'Free Blocks and Wait Num Block Over Time\n(Skipped head: {skip_head}, tail: {skip_tail})')
     plt.grid(True)
     plt.tight_layout()
     plt.savefig(second_plot_path, dpi=300, bbox_inches='tight')
@@ -237,19 +268,45 @@ def parse_log_and_plot(log_file_path, num_ranks, save_folder, show_instance_lege
     print(f"  - {first_plot_path}")
     print(f"  - {second_plot_path}")
 
+# 主函数，添加命令行参数解析
+def main():
+    parser = argparse.ArgumentParser(description='Parse proxy log and plot metrics.')
+    parser.add_argument('--log_file', type=str, 
+                        default='/nvme2/share/chenjiefei/scripts/proxy_log/proxy_res_20250820_230400_501.log',
+                        help='Path to the log file')
+    parser.add_argument('--num_ranks', type=int, default=32,
+                        help='Number of ranks/nodes')
+    parser.add_argument('--save_folder', type=str, 
+                        default='/nvme2/share/chenjiefei/src/lmdeploy/plot/test',
+                        help='Directory to save output plots')
+    parser.add_argument('--time_interval', type=float, default=9.5,
+                        help='Time interval in minutes for each plot (default: 9.5)')
+    parser.add_argument('--skip_head', type=int, default=600,
+                        help='Skip the first N records for each rank/node (default: 0)')
+    parser.add_argument('--skip_tail', type=int, default=600,
+                        help='Skip the last N records for each rank/node (default: 0)')
+    parser.add_argument('--show_instance_legend', action='store_true',
+                        help='Show legend for individual instances')
+    
+    args = parser.parse_args()
+    
+    parse_log_and_plot(
+        log_file_path=args.log_file,
+        num_ranks=args.num_ranks,
+        save_folder=args.save_folder,
+        time_interval=args.time_interval,
+        skip_head=args.skip_head,
+        skip_tail=args.skip_tail,
+        show_instance_legend=args.show_instance_legend
+    )
+
 # 示例使用
 if __name__ == '__main__':
-    log_file_path = "/nvme2/share/chenjiefei/scripts/proxy_log/proxy_res_20250820_230400_501.log"  # 请替换为您的log文件路径
-    num_ranks = 32             # 请替换为您的RANK数量
-    save_folder = "/nvme2/share/chenjiefei/src/lmdeploy/plot/test"      # 请替换为您想要保存的文件夹路径
+    # 使用命令行参数
+    main()
     
-    # 默认不显示instance图例
-    parse_log_and_plot(log_file_path, num_ranks, save_folder)
-    
-    # 如果需要显示instance图例，可以这样调用
-    # parse_log_and_plot(log_file_path, num_ranks, save_folder, show_instance_legend=True)
-    
-    # 如果需要显示instance图例，可以这样调用
-    # parse_log_and_plot(log_file_path, num_ranks, save_folder, show_instance_legend=True)
-    
-# /nvme2/share/chenjiefei/scripts/proxy_log/proxy_res_20250820_213220_214.log
+    # 或者直接调用（保留原有接口）
+    # log_file_path = "/nvme2/share/chenjiefei/scripts/proxy_log/proxy_res_20250820_230400_501.log"
+    # num_ranks = 32
+    # save_folder = "/nvme2/share/chenjiefei/src/lmdeploy/plot/test"
+    # parse_log_and_plot(log_file_path, num_ranks, save_folder)
