@@ -48,29 +48,39 @@ def get_distinct_colors(count):
 # 日志解析
 # -------------------------------------------------
 def parse_log_data(log_str, skip_head=0, skip_tail=0):
-    pattern = (r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - '
+    # 精确匹配新的日志格式，包含所有可能的字段
+    pattern = (r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d)\] '
                r'Node: (\d+), '
                r'KV Cache Usage: ([\d.]+), '
                r'Total Tokens: (\d+), '
                r'Running Requests: (\d+), '
                r'Waiting Requests: (\d+), '
-               r'Batch Size: (\d+)')
+               r'Batch Size: (\d+), '
+               r'Free Blocks: \d+, '
+               r'Wait First Block: \d+, '
+               r'Wait Num Block: \d+')
 
     node_raw = {}
     for line in log_str.strip().split('\n'):
         match = re.search(pattern, line)
         if not match:
-            continue
+            continue  # 跳过不匹配的行
+        
+        # 提取需要的字段（忽略新增的三个字段）
         ts_str, nid, kv, total_tokens, run, wait, batch = match.groups()
-        ts          = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
-        nid         = int(nid)
-        kv          = float(kv)
-        total_tokens= int(total_tokens)
-        run         = int(run)
-        wait        = int(wait)
-        batch       = int(batch)
+        
+        # 解析时间戳（包含百毫秒）
+        ts = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S.%f')
+        nid = int(nid)
+        kv = float(kv)
+        total_tokens = int(total_tokens)
+        run = int(run)
+        wait = int(wait)
+        batch = int(batch)
+        
         node_raw.setdefault(nid, []).append((ts, kv, total_tokens, run, wait, batch))
 
+    # 以下部分保持不变
     node_data = {}
     for nid, records in node_raw.items():
         records.sort(key=lambda x: x[0])
@@ -217,18 +227,18 @@ def plot_metrics(data, metric_name, ylabel, title, output_dir,
 def main():
     parser = argparse.ArgumentParser(description='Parse and visualize proxy log metrics.')
     parser.add_argument('--log_file', type=str,
-                        default='/nvme4/share/chenjiefei/scripts/proxy_log/proxy_res_20250806_195705_40000_rounrobin.log',
+                        default='/nvme2/share/chenjiefei/scripts/proxy_log/proxy_res_20250821_074846_471_rate48_batchsize_balance_0821.log',
                         help='Path to the log file')
     parser.add_argument('--output_dir', type=str,
-                        default='/nvme4/share/chenjiefei/src/lmdeploy/plot/kvcache_balance_proxy',
+                        default='/nvme2/share/chenjiefei/src/lmdeploy/plot/0821_ratio_0.01_rate_48_batchsize_balance',
                         help='Directory to save output plots')
     parser.add_argument('--ranks_per_plot', type=int, default=4,
-                        help='Number of ranks/nodes to display per plot (default: 8)')
-    parser.add_argument('--time_interval', type=int, default=12,
+                        help='Number of ranks/nodes to display per plot (default: 4)')
+    parser.add_argument('--time_interval', type=int, default=9.5,
                         help='Time interval in minutes for each plot (default: 3)')
-    parser.add_argument('--skip_head', type=int, default=20,
+    parser.add_argument('--skip_head', type=int, default=0,
                         help='Skip the first N records for each rank/node (default: 0)')
-    parser.add_argument('--skip_tail', type=int, default=0,
+    parser.add_argument('--skip_tail', type=int, default=150,
                         help='Skip the last N records for each rank/node (default: 0)')
     args = parser.parse_args()
 

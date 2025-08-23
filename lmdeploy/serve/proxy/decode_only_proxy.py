@@ -35,13 +35,13 @@ from lmdeploy.serve.proxy.constants import AIOHTTP_TIMEOUT, LATENCY_DEQUE_LEN, E
 
 from viztracer import VizTracer
 
-log_folder = "/nvme4/share/chenjiefei/scripts/proxy_log/"
+log_folder = "/nvme2/share/chenjiefei/scripts/proxy_log/"
 
 if not os.path.exists(log_folder):
     os.makedirs(log_folder, exist_ok=True)
 
-# 获取包含详细时间的时间戳（年-月-日-时-分-秒）
-current_datetime = datetime.now().strftime("%Y%m%d_%H%M%S")
+# 获取包含毫秒的时间戳（年-月-日-时-分-秒-毫秒）
+current_datetime = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # 取微秒前三位作为毫秒
 # 定义包含详细时间的日志文件名
 log_filename = os.path.join(log_folder, f"proxy_res_{current_datetime}.log")
 
@@ -54,10 +54,12 @@ if logger.handlers:
     logger.handlers.clear()
 
 file_handler = logging.FileHandler(log_filename, encoding='utf-8')
-formatter = logging.Formatter('%(asctime)s - %(message)s',
-                              datefmt='%Y-%m-%d %H:%M:%S')
-file_handler.setFormatter(formatter)
+# 日志格式中添加毫秒，使用%f表示微秒，取前三位作为毫秒
+# formatter = logging.Formatter('%(asctime)s.%(msecs)03d - %(message)s',
+#                               datefmt='%Y-%m-%d %H:%M:%S')
+formatter = logging.Formatter('%(message)s')
 
+file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
 console_handler = logging.StreamHandler(sys.stdout)
@@ -285,12 +287,15 @@ class NodeManager:
 
     def _log_metrics(self, print_kv_cache: bool = True, print_batch_size: bool = True, 
                 print_avg_tpot: bool = False, print_num_running: bool = True, print_num_waiting: bool = True,
-                print_free_blocks: bool = True, print_wait_first_block: bool = True, print_wait_num_block: bool = True):
+                print_free_blocks: bool = False, print_wait_first_block: bool = False, print_wait_num_block: bool = False):
         """打印节点指标日志（增加free_blocks、wait_first_block、wait_num_block指标的支持）"""
         # 若所有参数均为 False，则不打印任何内容
         if not any([print_kv_cache, print_batch_size, print_avg_tpot, print_num_running, 
                     print_num_waiting, print_free_blocks, print_wait_first_block, print_wait_num_block]):
             return
+
+        # 导入datetime模块（如果模块已在文件顶部导入，这里可以省略）
+        from datetime import datetime
 
         # 获取所有解码节点
         decode_nodes = self.decode_nodes
@@ -320,12 +325,20 @@ class NodeManager:
         if print_wait_num_block:
             title_parts.append('Wait Num Block')
 
-        logger.info(f"=== {' & '.join(title_parts)} Metrics ===")
+        # 获取当前迭代的时间戳（精确到百毫秒级别，即一位小数表示0.1秒精度）
+        now = datetime.now()
+        # 基础时间（到秒）
+        time_base = now.strftime("%Y-%m-%d %H:%M:%S")
+        # 计算百毫秒（0-9，代表0.0-0.9秒）
+        centiseconds = (now.microsecond // 100000)  # 每100毫秒为一个单位
+        current_time = f"{time_base}.{centiseconds}"
 
-        # 遍历排序后的节点并输出指标，使用dp_rank标识节点
+        logger.info(f"[{current_time}] === {' & '.join(title_parts)} Metrics ===")
+
+        # 遍历排序后的节点并输出指标，使用相同的时间戳
         for node in sorted_nodes:
-            # 使用节点的dp_rank代替索引
-            log_items = [f'Node: {node.dp_rank}']
+            # 所有节点共用当前迭代的时间戳
+            log_items = [f'[{current_time}] Node: {node.dp_rank}']
 
             if print_kv_cache:
                 usage = node.kvcache_usage or 0
