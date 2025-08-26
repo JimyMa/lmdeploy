@@ -255,6 +255,10 @@ def run(rank, world_size):
     # 合并local和SP请求
     flat = torch.cat([local_reqs, flat_sp], dim=0)  # (local_request_num + total_sp, C, D)
 
+    # ---- 新增打印：All-Gather & 拼接完成后 ----
+    print(f"[RANK {rank}] after concat: flat.size(0) = {flat.size(0)}  "
+          f"(local={local_reqs.size(0)}, sp_total={flat_sp.size(0)})")
+
     W = torch.randn(D, D_OUT, device=device)
     results = torch.matmul(flat, W) if flat.numel() > 0 else torch.empty(0, C, D_OUT, device=device)  # (local_request_num + total_sp, C, D_OUT)
 
