@@ -221,7 +221,12 @@ def run(rank, world_size):
 
     # 每个rank有5个请求：1个local_request，4个sp_request
     local_request_num = 1
-    sp_request_num = 4
+    sp_request_num = 4 if rank != 2 else 0          # 与下面保持一致
+    total_request_num = local_request_num + sp_request_num
+    print(f"[RANK {rank}] "
+          f"local={local_request_num}, "
+          f"sp={sp_request_num}, "
+          f"total={total_request_num}")
     
     # 1. 生成local requests和sp requests
     local_reqs = torch.randn(local_request_num, C, D, device=device) * 10
