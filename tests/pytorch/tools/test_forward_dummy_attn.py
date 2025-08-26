@@ -11,7 +11,6 @@ HEAD_DIM      = 576
 KV_NUM_HEADS  = 8
 KV_DIM        = HEAD_DIM
 MAX_SEQ_LEN   = 1024
-BATCH_SIZE    = 4
 
 def empty_tensor(shape: tuple, device: torch.device) -> torch.Tensor:
     return torch.empty(shape, dtype=torch.float32, device=device)
@@ -25,15 +24,15 @@ def pad_to_max_len(tensor: torch.Tensor, max_len: int, dim: int = 0) -> torch.Te
     pad = torch.zeros(pad_shape, dtype=tensor.dtype, device=tensor.device)
     return torch.cat([tensor, pad], dim=dim)
 
-def get_fixed_qkv(device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def get_fixed_qkv(batch_size: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """仅生成Q；K/V返回空张量保持接口兼容"""
-    q = torch.zeros(BATCH_SIZE, NUM_HEADS, HEAD_DIM, device=device)
-    for b in range(BATCH_SIZE):
+    q = torch.zeros(batch_size, NUM_HEADS, HEAD_DIM, device=device)
+    for b in range(batch_size):
         for h in range(NUM_HEADS):
             for d in range(HEAD_DIM):
                 q[b, h, d] = b*100 + h*10 + d
-    k = torch.empty(BATCH_SIZE, MAX_SEQ_LEN, KV_NUM_HEADS, KV_DIM, device=device)
-    v = torch.empty(BATCH_SIZE, MAX_SEQ_LEN, KV_NUM_HEADS, KV_DIM, device=device)
+    k = torch.empty(batch_size, MAX_SEQ_LEN, KV_NUM_HEADS, KV_DIM, device=device)
+    v = torch.empty(batch_size, MAX_SEQ_LEN, KV_NUM_HEADS, KV_DIM, device=device)
     return q, k, v
 
 def dummy_merge(results_list: list[torch.Tensor]) -> torch.Tensor:
@@ -56,12 +55,12 @@ def forward(
     print(f"\n========== [RANK {rank}] START ==========",flush=True)
 
     # 1) 获取 Q
-    query_states, _, _ = get_fixed_qkv(device)
+    query_states, _, _ = get_fixed_qkv(hidden_states.shape[0], device)
     print(f"[RANK {rank}] query_states  -> {query_states.shape}",flush=True)
 
     # 2) 拆分本地 / SP 请求
     local_batches, sp_batches = [], []
-    for b in range(BATCH_SIZE):
+    for b in range(query_states.shape[0]):
         info = sp_groups_info.get(b, {'enabled': False})
         if not info['enabled']:
             local_batches.append(b)
@@ -265,7 +264,6 @@ def verify_results(rank: int, final_output: torch.Tensor, sp_groups_info: Dict) 
 def test_forward(rank: int, world_size: int):
     init_distributed(rank, world_size)
     device = torch.device(f'cuda:{rank}')
-    hidden_states = torch.randn(BATCH_SIZE, MAX_SEQ_LEN, HEAD_DIM, device=device)
 
     # 每个Rank的SP组配置：Batch 0/1为SP请求（组[0,1,2,3]），Batch 2/3为Local请求
     sp_groups_info_list = [
@@ -282,6 +280,9 @@ def test_forward(rank: int, world_size: int):
          1: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 3},
          2: {'enabled': False}, 3: {'enabled': False}},
     ]
+
+    bs_current_rank = len(sp_groups_info_list[rank])
+    hidden_states = torch.randn(bs_current_rank, MAX_SEQ_LEN, HEAD_DIM, device=device)
 
     # 预创建SP通信组（避免重复创建）
     sp_comm_groups = {}
