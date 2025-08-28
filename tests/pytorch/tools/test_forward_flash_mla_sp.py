@@ -87,7 +87,6 @@ def flash_mla_fwd_sp(
         local_q = torch.stack(local_q_list) if local_q_list else \
                   torch.empty(0, q.shape[1], q.shape[2], dtype=q.dtype, device=device)
         local_cnt = len(local_q_list)
-        print(f"[RANK {rank}] SP组 {key} - local_q shape: {local_q.shape}, dtype: {local_q.dtype}, 本地请求数: {local_cnt}", flush=True)
 
         # 同步组内所有Rank的请求数
         local_cnt_tensor = torch.tensor([local_cnt], dtype=torch.long, device=device)
@@ -308,20 +307,20 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
     sp_groups_info_list = [
         # rank0: q_batch_size=3
         {0: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 0},
-         1: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 0},
-         2: {'enabled': False}},
+        1: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 0},
+        2: {'enabled': False}},
         # rank1: q_batch_size=3
         {0: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 1},
-         1: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 1},
-         2: {'enabled': False}},
+        1: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 1},
+        2: {'enabled': False}},
         # rank2: q_batch_size=3
         {0: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 2},
-         1: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 2},
-         2: {'enabled': False}},
+        1: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 2},
+        2: {'enabled': False}},
         # rank3: q_batch_size=3
         {0: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 3},
-         1: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 3},
-         2: {'enabled': False}}
+        1: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 3},
+        2: {'enabled': False}}
     ]
 
     # 4. 验证配置长度
@@ -341,9 +340,6 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
     key_value_cache = torch.randn(
         NUM_BLOCKS, block_size, num_kv_heads, head_size, dtype=dtype, device=device
     )
-    key_value_cache_this_rank = key_value_cache[
-        rank * NUM_BLOCKS_PER_RANK : (rank + 1) * NUM_BLOCKS_PER_RANK
-    ]
 
     # Block Table
     kv_lens_this_rank = kv_lens_per_rank[rank]
