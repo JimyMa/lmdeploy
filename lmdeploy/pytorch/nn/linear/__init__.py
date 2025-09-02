@@ -15,6 +15,10 @@ from .w8a8 import MergedW8A8Linear, QKVW8A8Linear, W8A8Linear
 
 def _is_dp_enabled():
     """Is dp."""
+    # logger.error(f"call _is_dp_enabled, return {get_dp_world_rank()[0] > 1}")
+    dist_ctx = get_dist_manager().current_context()
+    if dist_ctx.enable_sp:
+        return True
     return get_dp_world_rank()[0] > 1
 
 
@@ -32,11 +36,14 @@ def _get_dp_gather(is_tp: bool):
 def _get_dp_tp_meta(all_reduce: bool = True):
     """Get tp meta."""
     dist_ctx = get_dist_manager().current_context()
-    dist_attn_cfg = dist_ctx.dist_config.attn_config
-    tp = dist_attn_cfg.tp
-    is_tp = tp > 1
-    all_reduce = all_reduce if is_tp else False
-    return is_tp, all_reduce
+    if dist_ctx.enable_sp:
+        return False, False
+    else:
+        dist_attn_cfg = dist_ctx.dist_config.attn_config
+        tp = dist_attn_cfg.tp
+        is_tp = tp > 1
+        all_reduce = all_reduce if is_tp else False
+        return is_tp, all_reduce
 
 
 def build_linear(in_features: int,

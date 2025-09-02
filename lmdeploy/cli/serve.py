@@ -365,6 +365,9 @@ class SubCliServe:
         vision_config = VisionConfig(args.vision_max_batch_size)
         if args.dp == 1:
             from lmdeploy.serve.openai.api_server import serve as run_api_server
+            from lmdeploy.serve.openai.launch_server import get_host_ip
+
+            server_name = get_host_ip()
 
             run_api_server(args.model_path,
                            model_name=args.model_name,
@@ -372,7 +375,7 @@ class SubCliServe:
                            backend_config=backend_config,
                            chat_template_config=chat_template_config,
                            vision_config=vision_config,
-                           server_name=args.server_name,
+                           server_name=server_name,
                            server_port=args.server_port,
                            allow_origins=args.allow_origins,
                            allow_credentials=args.allow_credentials,

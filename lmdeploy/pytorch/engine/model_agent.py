@@ -481,13 +481,8 @@ class BaseModelAgent:
     def _broadcast_next_token(self, next_token_ids: torch.Tensor, dist_ctx: DistContext = None):
         if dist_ctx is None:
             dist_ctx = get_dist_manager().current_context()
-        if self.cache_config.role == EngineRole.Decode:
-            next_token_ids = next_token_ids.cpu()
-            tp_cpu_group = dist_ctx.tp_cpu_group
-            dist.all_reduce(next_token_ids, op=dist.ReduceOp.SUM, group=tp_cpu_group)
-        else:
-            tp_gpu_group = dist_ctx.tp_gpu_group
-            dist.broadcast(next_token_ids, src=0, group=tp_gpu_group)
+        tp_gpu_group = dist_ctx.tp_gpu_group
+        dist.broadcast(next_token_ids, src=0, group=tp_gpu_group)
         return next_token_ids
 
     async def _async_step_background(

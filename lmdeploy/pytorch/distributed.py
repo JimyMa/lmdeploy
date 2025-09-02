@@ -17,6 +17,7 @@ class DistContext:
     tp: int = 1
     dp: int = 1
     ep: int = 1
+    enable_sp: bool = True
     tp_rank: int = 0
     dp_rank: int = 0
     ep_rank: int = 0
@@ -108,6 +109,7 @@ class DistContext:
             ep_gpu_group=ep_gpu_group,
             ep_gpu_groups=ep_gpu_groups,
             dist_config=dist_config,
+            enable_sp=dist_config.enable_sp
         )
         return context
 
@@ -172,7 +174,11 @@ def get_world_rank():
 
 def get_tp_world_rank():
     ctx = get_dist_manager().current_context()
-    return ctx.tp, ctx.tp_rank
+    # logger.error(f"call get_tp_world_rank(), tp: {ctx.tp}, tp_rank: {ctx.tp_rank}")
+    if ctx.enable_sp:
+        return 1, 0
+    else:
+        return ctx.tp, ctx.tp_rank
 
 
 def get_dp_world_rank():

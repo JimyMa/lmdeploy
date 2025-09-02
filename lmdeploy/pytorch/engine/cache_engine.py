@@ -11,6 +11,7 @@ from lmdeploy.pytorch.disagg.backend.base import MigrationBackendImpl
 from lmdeploy.pytorch.disagg.conn.protocol import DistServeInitRequest, DistServeKVTransferEndpointInfo
 from lmdeploy.pytorch.disagg.messages import (AssignmentInstruct, DistServeRegisterMRMessage, MigrationAssignment,
                                               MigrationExecutionBatch)
+from lmdeploy.pytorch.distributed import get_dist_manager
 from lmdeploy.utils import get_logger
 
 from ..config import CacheConfig, ModelConfig
@@ -100,13 +101,18 @@ class CacheEngine:
                                   quant_policy: Literal[0, 4, 8] = 0,
                                   local: bool = True):
         """Get single block shape."""
+        dist_ctx = get_dist_manager().current_context()
         attn_backend = get_backend()
         dtype = model_config.dtype
         num_heads = model_config.num_key_value_heads
-        if local:
-            assert num_heads % world_size == 0, \
-                f'num_heads: {num_heads}, world_size: {world_size}'
-            num_heads = num_heads // world_size
+        if dist_ctx.enable_sp:
+            num_heads = num_heads // 1
+        else:
+            if local:
+                assert num_heads % world_size == 0, \
+                    f'num_heads: {num_heads}, world_size: {world_size}'
+                num_heads = num_heads // world_size
+        # logger.error(f"call _get_key_block_shape_impl, num_heads: {num_heads}")
         if quant_policy == 4:  # pack head_dim to uint8
             assert head_size % 2 == 0, \
                 f'head_size: {head_size}, quant_policy: {quant_policy}'
@@ -122,14 +128,18 @@ class CacheEngine:
                                     quant_policy: Literal[0, 4, 8] = 0,
                                     local: bool = True):
         """Get single block shape."""
+        dist_ctx = get_dist_manager().current_context()
         attn_backend = get_backend()
         dtype = model_config.dtype
         num_heads = model_config.num_key_value_heads
-        if local:
-            assert num_heads % world_size == 0, \
-                f'num_heads: {num_heads}, world_size: {world_size}'
-            num_heads = num_heads // world_size
-        if quant_policy == 4:  # pack head_dim to uint8
+        if dist_ctx.enable_sp:
+            num_heads = num_heads // 1
+        else:
+            if local:
+                assert num_heads % world_size == 0, \
+                    f'num_heads: {num_heads}, world_size: {world_size}'
+                num_heads = num_heads // world_size
+
             assert head_size % 2 == 0, \
                 f'head_size: {head_size}, quant_policy: {quant_policy}'
             head_size = head_size // 2

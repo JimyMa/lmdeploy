@@ -536,11 +536,14 @@ class DeepseekV2Attention(nn.Module):
     ):
         """Rewrite of LlamaAttention.forward."""
         dist_ctx = get_dist_manager().current_context()
-        if dist_ctx.dp > 1:
+        if dist_ctx.enable_sp:
             num_heads = self.num_heads
         else:
-            world_size = dist_ctx.world_size
-            num_heads = self.num_heads // world_size
+            if dist_ctx.dp > 1:
+                num_heads = self.num_heads
+            else:
+                world_size = dist_ctx.world_size
+                num_heads = self.num_heads // world_size
         nope_size = self.kv_lora_rank
         q_len = hidden_states.size(1)
 
@@ -694,7 +697,10 @@ class DeepseekV2MoE(nn.Module):
         dist_ctx = get_dist_manager().current_context()
         dp = dist_ctx.dp
         world_size = dist_ctx.world_size
-        moe_all_reduce = dp > 1 and dist_ctx.tp > 1
+        if dist_ctx.enable_sp:
+            moe_all_reduce = False
+        else:
+            moe_all_reduce = dp > 1 and dist_ctx.tp > 1
         if get_dist_manager().current_context().dist_config.enable_eplb:
             eplb_dispatch_info = EPLBManager.get_dispatch_info(
                 ep_rank=dist_ctx.ep_rank,
@@ -727,10 +733,13 @@ class DeepseekV2MoE(nn.Module):
                 is_shared_expert=True,
             )
 
-        if dp == 1 and world_size > 1:
-            self._all_reduce = True
-        else:
+        if dist_ctx.enable_sp:
             self._all_reduce = False
+        else:
+            if dp == 1 and world_size > 1:
+                self._all_reduce = True
+            else:
+                self._all_reduce = False
 
     def forward(self, hidden_states: torch.Tensor, dummy_batch_size: Optional[int] = None):
         """forward."""
@@ -857,15 +866,19 @@ class DeepseekV2MLP(nn.Module):
         if is_shared_expert:
             dist_ctx = get_dist_manager().current_context()
             dp = dist_ctx.dp
-            if dp == 1:
-                # split weight, do all reduce in moe
-                is_tp = True
-                all_reduce = False
-            else:
-                # do not split weight on dp
-                # TODO: support dp+tp?
+            if dist_ctx.enable_sp:
                 is_tp = False
                 all_reduce = False
+            else:
+                if dp == 1:
+                    # split weight, do all reduce in moe
+                    is_tp = True
+                    all_reduce = False
+                else:
+                    # do not split weight on dp
+                    # TODO: support dp+tp?
+                    is_tp = False
+                    all_reduce = False
         else:
             all_reduce = True
             is_tp = True

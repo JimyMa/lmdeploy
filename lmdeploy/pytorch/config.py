@@ -104,6 +104,7 @@ class DistConfig:
     dp_rank: int = 0
     enable_microbatch: bool = False
     enable_eplb: bool = False
+    enable_sp: bool = True
     world_size: int = None
     attn_config: 'DistConfig' = None
 
@@ -122,9 +123,12 @@ class DistConfig:
 
     def need_dummy_batch(self):
         """Need dummy batch."""
-        if self.dp == 1:
-            return False
-        return self.tp > 1 or self.ep > 1
+        if self.enable_sp:
+            return self.ep > 1
+        else:
+            if self.dp == 1:
+                return False
+            return self.tp > 1 or self.ep > 1
 
 
 @dataclass
@@ -202,10 +206,13 @@ class ModelConfig:
         from lmdeploy.pytorch.configurations import AutoModelConfigBuilder
         if dist_config is None:
             dist_config = DistConfig()
-        if dist_config.dp == 1:
-            tp = dist_config.tp
-        else:
+        if dist_config.enable_sp:
             tp = 1
+        else:
+            if dist_config.dp == 1:
+                tp = dist_config.tp
+            else:
+                tp = 1
 
         model_config = AutoModelConfigBuilder.build(hf_config, model_path, tp=tp)
 
