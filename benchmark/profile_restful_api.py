@@ -992,7 +992,7 @@ async def benchmark(
 def save_request_details(request_ids: List[int], outputs: List[RequestFuncOutput], base_dir: str = None):
     """保存每个请求的详细指标到指定目录的CSV文件"""
     # 设置默认目录
-    default_dir = "/nvme4/share/chenjiefei/scripts/csv/"
+    default_dir = "/nvme2/share/chenjiefei/scripts/csv/"
     target_dir = base_dir or default_dir
     
     # 确保目录存在
@@ -1175,8 +1175,8 @@ def run_benchmark(args_: argparse.Namespace):
         )
     elif args.dataset_name == 'mix_datasets':
         input_requests = sample_mix_datasets_requests(
-            long_dataset_path="/nvme4/share/chenjiefei/dataset/filtered_medha/gemini_issues_processed_data.json",
-            short_dataset_path="/nvme4/share/chenjiefei/dataset/tokenized_sharegpt/sharegpt_data_filtered.json",
+            long_dataset_path="/nvme2/share/chenjiefei/dataset/filtered_medha/gemini_issues_processed_data.json",
+            short_dataset_path="/nvme2/share/chenjiefei/dataset/tokenized_sharegpt/sharegpt_data_filtered.json",
             num_prompts=args.num_prompts,
             long_ratio=0.01,
         )

@@ -521,6 +521,7 @@ class TritonAttentionBuilder(AttentionBuilder[TritonAttentionMetadata]):
     ) -> TritonAttentionImpl:
         """build."""
         if use_flash_mla is True:
+            logger.error(f"use FlashMLAImpl !!!")
             return FlashMLAImpl(num_heads,
                                 head_size,
                                 scale=scale,
@@ -532,6 +533,7 @@ class TritonAttentionBuilder(AttentionBuilder[TritonAttentionMetadata]):
                                 causal=causal,
                                 **kwargs)
         elif use_fa3 and not alibi:
+            logger.error(f"use FA3Impl !!!")
             return FA3Impl(num_heads,
                            head_size,
                            scale=scale,
@@ -543,6 +545,7 @@ class TritonAttentionBuilder(AttentionBuilder[TritonAttentionMetadata]):
                            causal=causal,
                            **kwargs)
         else:
+            logger.error(f"use TritonAttentionImpl !!!")
             return TritonAttentionImpl(num_heads,
                                        head_size,
                                        scale=scale,
