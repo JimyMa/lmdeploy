@@ -221,6 +221,9 @@ def flash_mla_fwd_sp(
         assert len(recv_dtypes) == 1, f"recv_list存在多dtype: {recv_dtypes}"
         print(f"[RANK {rank}] SP组 {key} - recv_list所有张量dtype: {recv_dtypes.pop()}", flush=True)
 
+        print(f"[RANK {rank}] SP组 {key} - send_list[0].shape: {send_list[0].shape}",flush=True)
+        print(f"[RANK {rank}] SP组 {key} - recv_list[0].shape: {recv_list[0].shape}",flush=True)
+
         # 单次All2All通信
         dist.all_to_all(recv_list, send_list, group=comm)
 
