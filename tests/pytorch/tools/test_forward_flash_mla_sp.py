@@ -114,13 +114,10 @@ def flash_mla_fwd_sp(
         sp_batch_indices[key] = [b for b, _ in reqs] if reqs else []
 
         # 记录SP组元信息
-        master_rank = reqs[0][1]['master_rank'] if reqs else group_ranks[0]
         meta[key] = {
             'group_ranks': group_ranks,
-            'master_rank': master_rank,
             'local_batch_count': local_cnt,
-            'all_batch_counts': cnt_list,
-            'is_master': (rank == master_rank)
+            'all_batch_counts': cnt_list
         }
 
     # 5) 合并所有 Q
@@ -309,20 +306,20 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
     ]
     sp_groups_info_list = [
         # rank0: q_batch_size=3
-        {0: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 0},
-        1: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 0},
+        {0: {'enabled': True, 'group': [0,1,2,3]},
+        1: {'enabled': True, 'group': [0,1,2,3]},
         2: {'enabled': False}},
         # rank1: q_batch_size=3
-        {0: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 1},
-        1: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 1},
+        {0: {'enabled': True, 'group': [0,1,2,3]},
+        1: {'enabled': True, 'group': [0,1,2,3]},
         2: {'enabled': False}},
         # rank2: q_batch_size=3
-        {0: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 2},
-        1: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 2},
+        {0: {'enabled': True, 'group': [0,1,2,3]},
+        1: {'enabled': True, 'group': [0,1,2,3]},
         2: {'enabled': False}},
         # rank3: q_batch_size=3
-        {0: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 3},
-        1: {'enabled': True, 'group': [0,1,2,3], 'master_rank': 3},
+        {0: {'enabled': True, 'group': [0,1,2,3]},
+        1: {'enabled': True, 'group': [0,1,2,3]},
         2: {'enabled': False}}
     ]
 
