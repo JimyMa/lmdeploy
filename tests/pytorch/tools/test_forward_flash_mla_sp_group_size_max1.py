@@ -102,30 +102,34 @@ def all_gather_sp_q(
     """All-Gather收集SP请求的Q"""
     rank = dist.get_rank()
     device = q.device
-    
+
     print_shape_log(rank, f"all_gather_sp_q - 输入Q: {q.shape}")
     if not sp_group_key or local_cnt == 0:
         empty_q = torch.empty(0, q.shape[1], q.shape[2], dtype=q.dtype, device=device)
         print_shape_log(rank, f"  无SP请求，返回空Q: {empty_q.shape}")
         return empty_q
-    
-    # 填充本地Q到缓冲区
+
     comm = sp_comm_groups[sp_group_key]
     max_cnt = max(cnt_list)
+
+    # 1. 把本地数据拷进 in-buffer
     if local_cnt > 0:
         local_q = torch.stack([q[b] for b in sp_batch_indices])
         print_shape_log(rank, f"  本地SP Q: {local_q.shape}")
         buffer_manager.q_gathered_in_buffer[:local_cnt].copy_(local_q)
-    
-    # 执行All-Gather
-    gathered = buffer_manager.q_gathered_out_buffer[:len(sp_group_key), :max_cnt]
-    dist.all_gather_into_tensor(gathered.contiguous().view(-1), 
-                               buffer_manager.q_gathered_in_buffer.contiguous(), 
-                               group=comm)
-    print_shape_log(rank, f"  All-Gather后: {gathered.shape}")
-    
-    # 扁平化结果
-    flat_q = torch.cat([gathered[i, :c] for i, c in enumerate(cnt_list) if c > 0], dim=0)
+
+    # 2. 通信：始终用整个 out-buffer
+    # all_gather_into_tensor 要求发送/接收张量连续且大小匹配
+    dist.all_gather_into_tensor(
+        buffer_manager.q_gathered_out_buffer.contiguous().view(-1),
+        buffer_manager.q_gathered_in_buffer.contiguous(),
+        group=comm
+    )
+    print_shape_log(rank, f"  All-Gather后 out-buffer shape: {buffer_manager.q_gathered_out_buffer.shape}")
+
+    # 3. 用视图取出有效部分
+    gathered_view = buffer_manager.q_gathered_out_buffer[:len(sp_group_key), :max_cnt]
+    flat_q = torch.cat([gathered_view[i, :c] for i, c in enumerate(cnt_list) if c > 0], dim=0)
     print_shape_log(rank, f"  扁平化SP Q: {flat_q.shape}")
     return flat_q
 
