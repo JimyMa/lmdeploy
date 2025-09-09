@@ -82,13 +82,27 @@ def prepare_mla_fwd(
     sp_group_key = next(iter(sp_comm_groups.keys()), None)
     cnt_list = []
     if sp_group_key:
-        cnt_list = [sum(1 for b, info in sp_groups_info_list[r].items() 
-                      if info.get("enabled", False) and r in info["group"]) 
-                   for r in sp_group_key]
+        # 找到当前rank所属的所有组
+        my_groups = set()
+        for info in current_sp_info.values():
+            if isinstance(info, dict) and info.get("enabled", False):
+                my_groups.update(info.get("group", []))
+        
+        # 计算通信组中每个rank的SP请求数量（仅限当前rank所属的组）
+        cnt_list = []
+        for r in sp_group_key:
+            if r in my_groups:  # 只计算当前rank所属组中的rank
+                count = 0
+                for info in sp_groups_info_list[r].values():
+                    if isinstance(info, dict) and info.get("enabled", False) and r in info.get("group", []):
+                        count += 1
+                cnt_list.append(count)
+            else:
+                cnt_list.append(0)  # 不属于当前rank的组，计数为0
+                
         print_shape_log(rank, f"  SP组: {sp_group_key}, 各组请求数: {cnt_list}")
     
     return local_batches, sp_batch_indices, sp_group_key, cnt_list, local_cnt
-
 
 def all_gather_sp_q(
     buffer_manager: BufferManager,
@@ -274,12 +288,12 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
     print_shape_log(rank, f"配置: 头数={num_query_heads}, 头尺寸={head_size}, 设备={device}")
 
     # 数据配置
-    kv_lens_per_rank = [[2048]*8 for _ in range(world_size)]
+    kv_lens_per_rank = [[2048]*9 for _ in range(world_size)]
     sp_groups_info_list = [
         {0: {'enabled': True, 'group': [0,1,2,3]}, 1: {'enabled': True, 'group': [0,1,2,3]}, 2: {'enabled': False}},
         {0: {'enabled': True, 'group': [0,1,2,3]}, 1: {'enabled': True, 'group': [0,1,2,3]}, 2: {'enabled': False}},
         {0: {'enabled': True, 'group': [0,1,2,3]}, 1: {'enabled': True, 'group': [0,1,2,3]}, 2: {'enabled': False}},
-        {0: {'enabled': True, 'group': [0,1,2,3]}, 1: {'enabled': False}},
+        {0: {'enabled': True, 'group': [0,1,2,3]}, 1: {'enabled': True, 'group': [0,1,2,3]}, 2: {'enabled': False}},
     ]
     current_sp_info = sp_groups_info_list[rank]
     q_batch_size = len(current_sp_info)
