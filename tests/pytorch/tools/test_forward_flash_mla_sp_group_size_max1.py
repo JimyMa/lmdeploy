@@ -112,7 +112,7 @@ def all_gather_sp_q(
     device = q.device
 
     print_shape_log(rank, f"all_gather_sp_q - 输入Q: {q.shape}")
-    if not sp_group_key or sum(cnt_list) == 0:
+    if not sp_group_key:
         empty_q = torch.empty(0, q.shape[1], q.shape[2], dtype=q.dtype, device=device)
         print_shape_log(rank, f"  无SP请求，返回空Q: {empty_q.shape}")
         return empty_q
@@ -136,10 +136,15 @@ def all_gather_sp_q(
     print_shape_log(rank, f"  All-Gather后 out-buffer shape: {buffer_manager.q_gathered_out_buffer.shape}")
 
     # 3. 用视图取出有效部分
-    gathered_view = buffer_manager.q_gathered_out_buffer[:len(sp_group_key), :max_cnt]
-    flat_q = torch.cat([gathered_view[i, :c] for i, c in enumerate(cnt_list) if c > 0], dim=0)
-    print_shape_log(rank, f"  扁平化SP Q: {flat_q.shape}")
-    return flat_q
+    if max_cnt > 0:
+        gathered_view = buffer_manager.q_gathered_out_buffer[:len(sp_group_key), :max_cnt]
+        flat_q = torch.cat([gathered_view[i, :c] for i, c in enumerate(cnt_list) if c > 0], dim=0)
+        print_shape_log(rank, f"  扁平化SP Q: {flat_q.shape}")
+        return flat_q
+    else:
+        empty_q = torch.empty(0, q.shape[1], q.shape[2], dtype=q.dtype, device=device)
+        print_shape_log(rank, f"  无有效SP数据，返回空Q: {empty_q.shape}")
+        return empty_q
 
 
 def all_gather_sp_results(
@@ -156,7 +161,7 @@ def all_gather_sp_results(
     device = sp_res.device
     
     print_shape_log(rank, f"all_gather_sp_results - 输入: res={sp_res.shape}, lse={sp_lse.shape}")
-    if not sp_group_key or sum(cnt_list) == 0:
+    if not sp_group_key:
         empty_res = torch.empty(0, *sp_res.shape[1:], device=device, dtype=sp_res.dtype)
         empty_lse = torch.empty(0, *sp_lse.shape[1:], device=device, dtype=sp_lse.dtype)
         print_shape_log(rank, f"  无SP请求，返回空结果: {empty_res.shape}, {empty_lse.shape}")
@@ -286,12 +291,12 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
     # 数据配置
     kv_lens_per_rank = [[2048, 2048, 2048, 2048, 2048],
                         [2048, 2048, 2048, 2048, 2048],
-                        [2048, 2048, 2048],
-                        [2048, 2048, 2048]]
+                        [2048, 2048],
+                        [2048, 2048]]
     sp_groups_info_list = [
         {0: {'enabled': True, 'group': [0,1]}, 1: {'enabled': True, 'group': [0,1]}, 2: {'enabled': False}},
         {0: {'enabled': True, 'group': [0,1]}, 1: {'enabled': True, 'group': [0,1]}, 2: {'enabled': False}},
-        {0: {'enabled': True, 'group': [2,3]}, 1: {'enabled': True, 'group': [2,3]}, 2: {'enabled': False}},
+        {0: {'enabled': True, 'group': [2,3]}, 1: {'enabled': False}},
         {0: {'enabled': False}},
     ]
     current_sp_info = sp_groups_info_list[rank]
