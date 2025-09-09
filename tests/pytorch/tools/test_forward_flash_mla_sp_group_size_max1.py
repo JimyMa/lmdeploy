@@ -82,23 +82,17 @@ def prepare_mla_fwd(
     sp_group_key = next(iter(sp_comm_groups.keys()), None)
     cnt_list = []
     if sp_group_key:
-        # 找到当前rank所属的所有组
-        my_groups = set()
-        for info in current_sp_info.values():
-            if isinstance(info, dict) and info.get("enabled", False):
-                my_groups.update(info.get("group", []))
-        
-        # 计算通信组中每个rank的SP请求数量（仅限当前rank所属的组）
+        # 计算通信组中每个rank的SP请求数量
         cnt_list = []
         for r in sp_group_key:
-            if r in my_groups:  # 只计算当前rank所属组中的rank
-                count = 0
-                for info in sp_groups_info_list[r].values():
-                    if isinstance(info, dict) and info.get("enabled", False) and r in info.get("group", []):
+            count = 0
+            # 检查该rank的SP请求是否涉及当前rank
+            for info in sp_groups_info_list[r].values():
+                if isinstance(info, dict) and info.get("enabled", False):
+                    # 如果这个SP请求的组包含当前rank，则计入计数
+                    if rank in info.get("group", []):
                         count += 1
-                cnt_list.append(count)
-            else:
-                cnt_list.append(0)  # 不属于当前rank的组，计数为0
+            cnt_list.append(count)
                 
         print_shape_log(rank, f"  SP组: {sp_group_key}, 各组请求数: {cnt_list}")
     
@@ -118,7 +112,7 @@ def all_gather_sp_q(
     device = q.device
 
     print_shape_log(rank, f"all_gather_sp_q - 输入Q: {q.shape}")
-    if not sp_group_key or local_cnt == 0:
+    if not sp_group_key or sum(cnt_list) == 0:
         empty_q = torch.empty(0, q.shape[1], q.shape[2], dtype=q.dtype, device=device)
         print_shape_log(rank, f"  无SP请求，返回空Q: {empty_q.shape}")
         return empty_q
@@ -162,7 +156,7 @@ def all_gather_sp_results(
     device = sp_res.device
     
     print_shape_log(rank, f"all_gather_sp_results - 输入: res={sp_res.shape}, lse={sp_lse.shape}")
-    if not sp_group_key or local_cnt == 0:
+    if not sp_group_key or sum(cnt_list) == 0:
         empty_res = torch.empty(0, *sp_res.shape[1:], device=device, dtype=sp_res.dtype)
         empty_lse = torch.empty(0, *sp_lse.shape[1:], device=device, dtype=sp_lse.dtype)
         print_shape_log(rank, f"  无SP请求，返回空结果: {empty_res.shape}, {empty_lse.shape}")
@@ -189,7 +183,9 @@ def all_gather_sp_results(
     split_idx = buffer_manager.head_dim_v
     req_results, req_results_lse = [], []
     
-    for i, r in enumerate(sp_group_key):
+    # 只遍历cnt_list>0的rank（有效rank）
+    valid_ranks = [i for i, cnt in enumerate(cnt_list) if cnt > 0]
+    for i in valid_ranks:
         rank_data = buffer_manager.res_gathered_out_buffer[i]
         for global_idx in range(start_idx, end_idx):
             combined_result = rank_data[global_idx]
@@ -197,7 +193,7 @@ def all_gather_sp_results(
             lse_result = combined_result[..., split_idx:].squeeze(0)
             
             local_idx = global_idx - start_idx
-            if i == 0:
+            if i == valid_ranks[0]:
                 req_results.append([out_result])
                 req_results_lse.append([lse_result])
             else:
@@ -288,12 +284,15 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
     print_shape_log(rank, f"配置: 头数={num_query_heads}, 头尺寸={head_size}, 设备={device}")
 
     # 数据配置
-    kv_lens_per_rank = [[2048]*9 for _ in range(world_size)]
+    kv_lens_per_rank = [[2048, 2048, 2048, 2048, 2048],
+                        [2048, 2048, 2048, 2048, 2048],
+                        [2048, 2048, 2048],
+                        [2048, 2048, 2048]]
     sp_groups_info_list = [
-        {0: {'enabled': True, 'group': [0,1,2,3]}, 1: {'enabled': True, 'group': [0,1,2,3]}, 2: {'enabled': False}},
-        {0: {'enabled': True, 'group': [0,1,2,3]}, 1: {'enabled': True, 'group': [0,1,2,3]}, 2: {'enabled': False}},
-        {0: {'enabled': True, 'group': [0,1,2,3]}, 1: {'enabled': True, 'group': [0,1,2,3]}, 2: {'enabled': False}},
-        {0: {'enabled': True, 'group': [0,1,2,3]}, 1: {'enabled': True, 'group': [0,1,2,3]}, 2: {'enabled': False}},
+        {0: {'enabled': True, 'group': [0,1]}, 1: {'enabled': True, 'group': [0,1]}, 2: {'enabled': False}},
+        {0: {'enabled': True, 'group': [0,1]}, 1: {'enabled': True, 'group': [0,1]}, 2: {'enabled': False}},
+        {0: {'enabled': True, 'group': [2,3]}, 1: {'enabled': True, 'group': [2,3]}, 2: {'enabled': False}},
+        {0: {'enabled': False}},
     ]
     current_sp_info = sp_groups_info_list[rank]
     q_batch_size = len(current_sp_info)
