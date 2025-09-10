@@ -361,7 +361,7 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
     print_shape_log(rank, f"配置: 头数={num_query_heads}, pad_local={pad_local}, pad_sp={pad_sp}")
 
     # 测试数据（确保每个RANK的SP请求数≤2）
-    kv_lens_per_rank = [[2048]*5, [2048]*5, [2048]*2, [2048]*2]
+    kv_lens_per_rank = [[2048]*6, [2048]*6, [2048]*6, [2048]*6]
     sp_groups_info_list = [
         {0: {'enabled': True, 'group': [0,1,2,3]}, 1: {'enabled': True, 'group': [0,1,2,3]}, 2: {'enabled': False}},  # RANK0：2个SP请求
         {0: {'enabled': True, 'group': [0,1,2,3]}, 1: {'enabled': True, 'group': [0,1,2,3]}, 2: {'enabled': False}},  # RANK1：2个SP请求
