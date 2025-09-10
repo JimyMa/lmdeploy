@@ -23,7 +23,7 @@ def pad_req(
     pad_local: int = 128,
     pad_sp: int = 2,
     group_size: int = 1,
-    cnt_list: List[int] = []  # 新增：各rank有效SP请求数列表
+    cnt_list: List[int] = []
 ):
     device = q.device
     dtype = q.dtype
@@ -47,52 +47,43 @@ def pad_req(
         if block_num > 0:
             bt_local_pad[:real_local] = block_table[local_batches]
 
-    # --- SP请求pad（Q专用）：保留原逻辑（仅当前rank SP请求） ---
+    # --- SP请求pad（Q）---
     q_sp_pad = torch.zeros(pad_sp, num_query_heads, head_dim, dtype=dtype, device=device)
     if real_sp > 0:
         q_sp_pad[:real_sp] = q[sp_batch_indices]
 
-    # --- SP请求pad（block_table和kv_lens专用：核心修复部分） ---
+    # --- SP请求pad（block_table和kv_lens）---
     kv_sp_pad = torch.zeros(pad_sp * group_size, dtype=torch.int32, device=device)
     bt_sp_pad = torch.zeros(pad_sp * group_size, block_num, dtype=block_table.dtype, device=device) if block_num > 0 else torch.empty(0, 0, device=device)
     
-    # 关键修复：从real_local之后提取所有SP请求的原始数据（覆盖所有rank的SP请求）
-    # 避免仅使用当前rank的sp_batch_indices，确保包含其他rank的SP请求
     sp_kv_lens = kv_lens[real_local:] if (real_local < len(kv_lens)) else torch.empty(0, dtype=torch.int32, device=device)
     sp_block_table = block_table[real_local:] if (real_local < len(block_table) and block_num > 0) else torch.empty(0, block_num, dtype=block_table.dtype, device=device)
 
-    # 按cnt_list分配SP数据到对应rank的padding区域
-    sp_data_ptr = 0  # 追踪SP原始数据的分配进度
+    sp_data_ptr = 0
     for rank_idx in range(group_size):
-        # 1. 计算当前rank在SP padding区域的起始位置（每个rank占pad_sp个位置）
+
         rank_sp_start = rank_idx * pad_sp
-        # 2. 获取当前rank的有效SP请求数（从cnt_list读取，避免越界）
+
         current_rank_valid_cnt = cnt_list[rank_idx] if (rank_idx < len(cnt_list)) else 0
         
-        # 3. 边界检查：确保有有效数据且不超出原始SP数据范围
         if current_rank_valid_cnt <= 0:
             continue
         if sp_data_ptr + current_rank_valid_cnt > len(sp_kv_lens):
             print(f"[WARN] SP数据不足：当前需分配{current_rank_valid_cnt}个，剩余{len(sp_kv_lens)-sp_data_ptr}个")
             continue
 
-        # 4. 赋值kv_lens：当前rank的有效区域 = [rank_sp_start, rank_sp_start+current_rank_valid_cnt)
         kv_sp_pad[rank_sp_start : rank_sp_start + current_rank_valid_cnt] = sp_kv_lens[sp_data_ptr : sp_data_ptr + current_rank_valid_cnt]
         
-        # 5. 赋值block_table（需确保block_num有效）
         if block_num > 0 and sp_data_ptr + current_rank_valid_cnt <= len(sp_block_table):
             bt_sp_pad[rank_sp_start : rank_sp_start + current_rank_valid_cnt] = sp_block_table[sp_data_ptr : sp_data_ptr + current_rank_valid_cnt]
         
-        # 6. 更新数据指针（移动到下一个rank的数据源起始位置）
         sp_data_ptr += current_rank_valid_cnt
 
-    # --- 有效数据掩码 ---
     local_mask = torch.zeros(pad_local, dtype=torch.bool, device=device)
     local_mask[:real_local] = True
     sp_mask = torch.zeros(pad_sp, dtype=torch.bool, device=device)
     sp_mask[:real_sp] = True
 
-    # 拼接最终结果
     q_pad = torch.cat([q_local_pad, q_sp_pad], dim=0)
     kv_lens_pad = torch.cat([kv_local_pad, kv_sp_pad], dim=0)
     block_table_pad = torch.cat([bt_local_pad, bt_sp_pad], dim=0) if block_num > 0 else torch.empty(0, 0, device=device)
@@ -103,7 +94,6 @@ def pad_req(
             real_local, real_sp,
             q_total_pad, bt_kv_total_pad)
 
-# ---------- 预处理逻辑（聚合所有检查和分支逻辑） ----------
 def prepare_mla_fwd(
     rank: int,
     q: torch.Tensor,
@@ -124,18 +114,16 @@ def prepare_mla_fwd(
     print_shape_log(rank, f"prepare_mla_fwd - 本地请求数: {len(local_batches)}, SP请求数: {real_sp}")
     print_shape_log(rank, f"  local_batches: {local_batches}, sp_batch_indices: {sp_batch_indices}")
 
-    # 解析通信组信息（仅在prepare中处理Dict，后续函数直接用通信组对象）
     sp_group_key = next(iter(sp_comm_groups.keys()), None)
     if sp_group_key is not None:
         group_size = len(sp_group_key)
-        sp_comm_group = sp_comm_groups[sp_group_key]  # 提取直接传递的通信组对象
+        sp_comm_group = sp_comm_groups[sp_group_key]
         rank_idx_in_group = sp_group_key.index(rank)
     else:
         group_size = 0
-        sp_comm_group = None  # 无通信组时设为None
-        rank_idx_in_group = 0  # 默认索引0（无实际意义）
+        sp_comm_group = None
+        rank_idx_in_group = 0
 
-    # 计算cnt_list（每个rank的有效SP请求数）
     cnt_list = []
     if sp_group_key:
         for r in sp_group_key:
@@ -146,7 +134,6 @@ def prepare_mla_fwd(
             cnt_list.append(r_sp_cnt)
         print_shape_log(rank, f"  SP通信组 {sp_group_key} - 各rank有效SP请求数: {cnt_list}")
 
-    # 执行分离padding
     (q_pad, 
      kv_lens_pad, block_table_pad, 
      local_mask, sp_mask, 
@@ -163,8 +150,6 @@ def prepare_mla_fwd(
         group_size=group_size
     )
 
-    # -------------------------- 迁移所有assert检查 --------------------------
-    # 验证padding尺寸（原flash_mla_fwd_sp中的assert移到此处）
     assert q_pad.shape[0] == q_total_pad, \
         f"[RANK {rank}] Q的batch size错误，应为{q_total_pad}，实际为{q_pad.shape[0]}"
     assert block_table_pad.shape[0] == bt_kv_total_pad, \
@@ -172,45 +157,38 @@ def prepare_mla_fwd(
     assert kv_lens_pad.shape[0] == bt_kv_total_pad, \
         f"[RANK {rank}] cache_seqlens的batch size错误，应为{bt_kv_total_pad}，实际为{kv_lens_pad.shape[0]}"
 
-    # 计算更新后的metadata（使用block_table和kv_lens的尺寸）
     updated_metadata, updated_num_splits = get_mla_metadata(kv_lens_pad, num_query_heads, 1)
     print_shape_log(rank, f"prepare中metadata - 更新后: {updated_metadata.shape}")
 
-    # 返回值新增：sp_comm_group（直接传递的通信组）、rank_idx_in_group（提前计算好索引）
     return (local_batches, sp_batch_indices, real_sp, cnt_list,
             q_pad, kv_lens_pad, block_table_pad,
             local_mask, sp_mask, pad_local, pad_sp, group_size,
             q_total_pad, bt_kv_total_pad,
             updated_metadata, updated_num_splits,
-            sp_comm_group, rank_idx_in_group)  # 新增返回通信组和组内索引
+            sp_comm_group, rank_idx_in_group)
 
 
-# ---------- all_gather_sp_q：无分支、无assert（依赖prepare预处理） ----------
 def all_gather_sp_q(
     q: torch.Tensor,  # 形状为[pad_local + pad_sp, ...]
     pad_local: int,
     pad_sp: int,
-    sp_comm_group: Optional[ProcessGroup],  # 直接传递通信组对象
+    sp_comm_group: Optional[ProcessGroup],
     group_size: int
 ) -> torch.Tensor:
-    rank = dist.get_rank()
+    # rank = dist.get_rank()
     device = q.device
     num_head, head_dim = q.shape[1], q.shape[2]
     
-    # 分离本地请求和SP请求（固定逻辑，无分支）
     q_local = q[:pad_local]
-    q_sp = q[pad_local:]  # 形状为[pad_sp, ...]
+    q_sp = q[pad_local:]
     
-    # 收集所有rank的SP请求（group_size=0时自动生成空tensor，无分支）
     gathered_sp = torch.empty(group_size, pad_sp, num_head, head_dim, dtype=q.dtype, device=device)
     dist.all_gather_into_tensor(gathered_sp.view(-1), q_sp.contiguous(), group=sp_comm_group)
     
-    # 展平收集的SP请求（固定逻辑，无分支）
     sp_q_all = gathered_sp.reshape(-1, num_head, head_dim)  # 形状为[pad_sp * group_size, ...]
     
-    # 合并本地请求和所有SP请求（固定逻辑，无分支）
     all_q = torch.cat([q_local, sp_q_all], dim=0)
-    print_shape_log(rank, f"all_gather_sp_q - 合并后Q尺寸: {all_q.shape}")
+    # print_shape_log(rank, f"all_gather_sp_q - 合并后Q尺寸: {all_q.shape}")
     
     return all_q
 
@@ -224,62 +202,51 @@ def all_gather_sp_results(
     group_size: int,
     rank_idx_in_group: int  # 提前从prepare获取的组内索引（无分支计算）
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    rank = dist.get_rank()
+    # rank = dist.get_rank()
     device = sp_res_all.device
     head_dim_v = sp_res_all.shape[-1] if sp_res_all.nelement() > 0 else 0
 
-    # 保存lse的原始数据类型（固定逻辑，无分支）
     lse_original_dtype = sp_lse_all.dtype
-    print_shape_log(rank, f"lse原始类型: {lse_original_dtype}, sp_res类型: {sp_res_all.dtype}")
 
-    # 统一维度：给sp_lse_all插入第1维（固定逻辑，无分支）
+    # 统一维度：给sp_lse_all插入第1维
     sp_lse_reshaped = sp_lse_all.unsqueeze(1)
-    # 类型统一：lse转换为与res相同类型（固定逻辑，无分支）
     sp_lse_converted = sp_lse_reshaped.to(sp_res_all.dtype)
-    print_shape_log(rank, f"lse转换后类型: {sp_lse_converted.dtype}, 形状: {sp_lse_converted.shape}")
     
-    # 拼接res和lse（固定逻辑，无分支）
     combined = torch.cat([sp_res_all, sp_lse_converted], dim=-1)
-    print_shape_log(rank, f"拼接后combined.shape: {combined.shape}, dtype: {combined.dtype}")
+    # print_shape_log(rank, f"拼接后combined.shape: {combined.shape}, dtype: {combined.dtype}")
 
-    # 执行all gather（group_size=0时自动生成空tensor，无分支）
     gathered = torch.empty(
-        group_size,  # 第0维：通信组内rank数量
-        *combined.shape,  # 后续维度：与combined一致
+        group_size,
+        *combined.shape,
         dtype=combined.dtype, 
         device=device
     )
     dist.all_gather_into_tensor(gathered.view(-1), combined.contiguous(), group=sp_comm_group)
-    print_shape_log(rank, f"all gather后gathered.shape: {gathered.shape}, dtype: {gathered.dtype}")
+    # print_shape_log(rank, f"all gather后gathered.shape: {gathered.shape}, dtype: {gathered.dtype}")
 
-    # 提取当前rank对应的SP结果（固定逻辑，无分支）
     current_rank_combined = gathered[rank_idx_in_group]
     sp_slice_start = rank_idx_in_group * pad_sp
     sp_slice_end = sp_slice_start + pad_sp
     current_rank_sp_combined = current_rank_combined[sp_slice_start:sp_slice_end]
-    print_shape_log(rank, f"当前RANK对应SP切片范围: [{sp_slice_start}:{sp_slice_end}]，切片后shape: {current_rank_sp_combined.shape}")
+    # print_shape_log(rank, f"当前RANK对应SP切片范围: [{sp_slice_start}:{sp_slice_end}]，切片后shape: {current_rank_sp_combined.shape}")
 
-    # 拆分res和lse（固定逻辑，无分支）
     current_rank_sp_res = current_rank_sp_combined[..., :head_dim_v]
     current_rank_sp_lse = current_rank_sp_combined[..., head_dim_v:]
 
-    # 恢复lse原始类型（固定逻辑，无分支）
     current_rank_sp_lse = current_rank_sp_lse.to(lse_original_dtype)
-    # 维度还原（固定逻辑，无分支）
     current_rank_sp_lse = current_rank_sp_lse.squeeze(1)
 
-    print_shape_log(rank, f"最终提取结果形状: 本地SP res={current_rank_sp_res.shape}({current_rank_sp_res.dtype}), 本地SP lse={current_rank_sp_lse.shape}({current_rank_sp_lse.dtype})")
+    # print_shape_log(rank, f"最终提取结果形状: 本地SP res={current_rank_sp_res.shape}({current_rank_sp_res.dtype}), 本地SP lse={current_rank_sp_lse.shape}({current_rank_sp_lse.dtype})")
     return current_rank_sp_res, current_rank_sp_lse
 
 
-# ---------- 核心函数：无分支、无assert（完全依赖prepare预处理） ----------
 def flash_mla_fwd_sp(
     q: torch.Tensor,  # 形状为[pad_local + pad_sp, ...]
     k_cache: torch.Tensor,
     block_table: torch.Tensor,  # 形状为[pad_local + pad_sp * group_size, ...]
     cache_seqlens: torch.Tensor,  # 形状为[pad_local + pad_sp * group_size, ...]
     head_dim_v: int,
-    sp_comm_group: Optional[ProcessGroup],  # 核心修改：直接传递通信组对象（非Dict）
+    sp_comm_group: Optional[ProcessGroup],
     # 从prepare传递的预处理参数（避免在本函数计算）
     pad_local: int,
     pad_sp: int,
@@ -288,16 +255,16 @@ def flash_mla_fwd_sp(
     bt_kv_total_pad: int,
     updated_metadata: torch.Tensor,
     updated_num_splits: torch.Tensor,
-    rank_idx_in_group: int,  # 提前计算的组内索引
+    rank_idx_in_group: int,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    rank = dist.get_rank()
+    # rank = dist.get_rank()
     
-    print_shape_log(rank, f"\n===== flash_mla_fwd_sp 开始 =====")
-    print_shape_log(rank, f"Q的padding后尺寸: {q.shape} (预期: {q_total_pad})")
-    print_shape_log(rank, f"block_table的padding后尺寸: {block_table.shape} (预期: {bt_kv_total_pad})")
-    print_shape_log(rank, f"cache_seqlens的padding后尺寸: {cache_seqlens.shape} (预期: {bt_kv_total_pad})")
+    # print_shape_log(rank, f"\n===== flash_mla_fwd_sp 开始 =====")
+    # print_shape_log(rank, f"Q的padding后尺寸: {q.shape} (预期: {q_total_pad})")
+    # print_shape_log(rank, f"block_table的padding后尺寸: {block_table.shape} (预期: {bt_kv_total_pad})")
+    # print_shape_log(rank, f"cache_seqlens的padding后尺寸: {cache_seqlens.shape} (预期: {bt_kv_total_pad})")
 
     # 对Q执行all gather（直接传递通信组对象，无分支）
     all_q = all_gather_sp_q(
@@ -307,10 +274,10 @@ def flash_mla_fwd_sp(
         sp_comm_group=sp_comm_group,  # 核心修改：传通信组对象
         group_size=group_size
     )
-    print_shape_log(rank, f"all gather后Q的尺寸: {all_q.shape} (预期: {bt_kv_total_pad})")
+    # print_shape_log(rank, f"all gather后Q的尺寸: {all_q.shape} (预期: {bt_kv_total_pad})")
 
     # MLA计算（固定逻辑，无分支）
-    print_shape_log(rank, f"MLA输入 - key_value_cache: {k_cache.shape}, block_table: {block_table.shape}, cache_seqlens: {cache_seqlens.shape}")
+    # print_shape_log(rank, f"MLA输入 - key_value_cache: {k_cache.shape}, block_table: {block_table.shape}, cache_seqlens: {cache_seqlens.shape}")
     attn_output, lse = flash_mla_with_kvcache(
         q=all_q.unsqueeze(1),
         k_cache=k_cache,
@@ -322,38 +289,33 @@ def flash_mla_fwd_sp(
         softmax_scale=softmax_scale,
         causal=causal
     )
-    print_shape_log(rank, f"MLA输出: attn={attn_output.shape}, lse={lse.shape}, attn.dtype: {attn_output.dtype}, lse.dtype: {lse.dtype}")
+    # print_shape_log(rank, f"MLA输出: attn={attn_output.shape}, lse={lse.shape}, attn.dtype: {attn_output.dtype}, lse.dtype: {lse.dtype}")
 
-    # 拆分结果（固定逻辑，无分支）
     local_res = attn_output[:pad_local]  # [pad_local, 1, ...]
     sp_res_all = attn_output[pad_local:]  # [pad_sp*group_size, 1, ...]
     local_lse = lse[:pad_local]  # [pad_local, ...]
     sp_lse_all = lse[pad_local:]  # [pad_sp*group_size, ...]
-    print_shape_log(rank, f"拆分结果: local_res={local_res.shape}, 全局SP_res={sp_res_all.shape}, 全局SP_lse={sp_lse_all.shape}")
+    # print_shape_log(rank, f"拆分结果: local_res={local_res.shape}, 全局SP_res={sp_res_all.shape}, 全局SP_lse={sp_lse_all.shape}")
 
-    # 收集SP结果（直接传递通信组对象和预处理索引，无分支）
     local_sp_res, local_sp_lse = all_gather_sp_results(
         sp_res_all=sp_res_all,
         sp_lse_all=sp_lse_all,
-        sp_comm_group=sp_comm_group,  # 核心修改：传通信组对象
+        sp_comm_group=sp_comm_group,
         pad_sp=pad_sp,
         group_size=group_size,
-        rank_idx_in_group=rank_idx_in_group  # 预处理的索引（无分支计算）
+        rank_idx_in_group=rank_idx_in_group
     )
 
-    # 拼接所有结果（固定逻辑，无分支）
-    print_shape_log(rank, f"拼接前: local_res={local_res.shape}, local_sp_res={local_sp_res.shape}")
-    print_shape_log(rank, f"拼接前: local_lse={local_lse.shape}, local_sp_lse={local_sp_lse.shape}")
+    # print_shape_log(rank, f"拼接前: local_res={local_res.shape}, local_sp_res={local_sp_res.shape}")
+    # print_shape_log(rank, f"拼接前: local_lse={local_lse.shape}, local_sp_lse={local_sp_lse.shape}")
     final_out_pad = torch.cat([local_res, local_sp_res], dim=0)  # [pad_local+pad_sp, 1, ...]
     final_lse_pad = torch.cat([local_lse, local_sp_lse], dim=0)  # [pad_local+pad_sp, ...]
     
-    print_shape_log(rank, f"最终结果: out={final_out_pad.shape}, lse={final_lse_pad.shape}")
-    print_shape_log(rank, f"===== flash_mla_fwd_sp 结束 =====\n")
+    # print_shape_log(rank, f"最终结果: out={final_out_pad.shape}, lse={final_lse_pad.shape}")
+    # print_shape_log(rank, f"===== flash_mla_fwd_sp 结束 =====\n")
     
     return final_out_pad, final_lse_pad
 
-
-# ---------- 测试函数（适配参数修改） ----------
 def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
     os.environ['MASTER_ADDR'] = args.master_addr
     os.environ['MASTER_PORT'] = args.master_port
@@ -362,7 +324,6 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
     device = torch.device("cuda", rank)
     print_shape_log(rank, f"分布式初始化: rank={rank}, world_size={world_size}")
 
-    # 配置
     dtype = torch.bfloat16
     num_query_heads, head_size, head_dim_v = 32, 576, 512
     block_size = 64
@@ -372,7 +333,6 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
     pad_sp = 2       # 每个RANK的SP请求最大数量（固定为2）
     print_shape_log(rank, f"配置: 头数={num_query_heads}, pad_local={pad_local}, pad_sp={pad_sp}")
 
-    # 测试数据（确保每个RANK的SP请求数≤2）
     kv_lens_per_rank = [[2048]*6, [2048]*6, [2048]*6, [2048]*6]
     sp_groups_info_list = [
         {0: {'enabled': True, 'group': [0,1,2,3]}, 1: {'enabled': True, 'group': [0,1,2,3]}, 2: {'enabled': False}, 3: {'enabled': False}},  # RANK0：2个SP请求
@@ -383,7 +343,6 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
     current_sp_info = sp_groups_info_list[rank]
     q_batch_size = len(current_sp_info)
 
-    # 生成测试张量
     query = torch.randn(q_batch_size, num_query_heads, head_size, dtype=dtype, device=device) / 10
     key_value_cache = torch.randn(NUM_BLOCKS, block_size, 1, head_size, dtype=dtype, device=device)
     kv_lens_this_rank = kv_lens_per_rank[rank]
@@ -398,7 +357,7 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
     # 通信组配置（Dict仅用于prepare解析，后续函数直接用通信组对象）
     sp_comm_groups = {tuple(sorted([0,1,2,3])): dist.new_group([0,1,2,3])}
 
-    # 执行prepare（接收新增的sp_comm_group和rank_idx_in_group）
+    # 执行prepare
     prepare_outputs = prepare_mla_fwd(
         rank=rank,
         q=query,
@@ -407,17 +366,17 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
         q_batch_size=q_batch_size,
         num_query_heads=num_query_heads,
         sp_groups_info_list=sp_groups_info_list,
-        sp_comm_groups=sp_comm_groups,  # 仍传Dict用于prepare解析
+        sp_comm_groups=sp_comm_groups,
         pad_local=pad_local,
         pad_sp=pad_sp
     )
-    # 解构prepare返回值（适配新增的sp_comm_group和rank_idx_in_group）
+    
     (local_batches, sp_batch_indices, real_sp, cnt_list,
      q_pad, kv_lens_pad, block_table_pad,
      local_mask, sp_mask, pad_local, pad_sp, group_size,
      q_total_pad, bt_kv_total_pad,
      updated_metadata, updated_num_splits,
-     sp_comm_group, rank_idx_in_group) = prepare_outputs  # 接收通信组和组内索引
+     sp_comm_group, rank_idx_in_group) = prepare_outputs
 
     # 执行MLA
     out_pad, lse_pad = flash_mla_fwd_sp(
@@ -439,10 +398,10 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
         causal=True,
     )
 
-    # 外部提取有效输出（符合CUDA Graph要求：固定形状操作）
-    valid_local_out = out_pad[:pad_local][local_mask]  # 提取本地有效结果
+    # 外部提取有效输出
+    valid_local_out = out_pad[:pad_local][local_mask]
     valid_local_lse = lse_pad[:pad_local][local_mask]
-    valid_sp_out = out_pad[pad_local:][sp_mask]  # 提取当前RANK的有效SP结果（≤2个）
+    valid_sp_out = out_pad[pad_local:][sp_mask]
     valid_sp_lse = lse_pad[pad_local:][sp_mask]
 
     print_shape_log(rank, f"valid_local_out.shape: {valid_local_out.shape}, valid_local_lse.shape: {valid_local_lse.shape}, valid_sp_out.shape: {valid_sp_out.shape}, valid_sp_lse.shape: {valid_sp_lse.shape}")
@@ -450,7 +409,7 @@ def test_flash_mla(rank: int, world_size: int, args: argparse.Namespace):
     final_out = torch.cat([valid_local_out, valid_sp_out], dim=0)
     final_lse = torch.cat([valid_local_lse, valid_sp_lse], dim=0)
 
-    # 验证结果（仅在测试中保留，生产环境可移除）
+    # 验证结果
     assert final_out.shape[0] == len(local_batches) + len(sp_batch_indices), \
            f"[RANK {rank}] 有效结果数量错误: 实际{final_out.shape[0]} vs 预期{len(local_batches) + len(sp_batch_indices)}"
     assert final_out.dtype == dtype, f"[RANK {rank}] Dtype错误: {final_out.dtype} vs {dtype}"
