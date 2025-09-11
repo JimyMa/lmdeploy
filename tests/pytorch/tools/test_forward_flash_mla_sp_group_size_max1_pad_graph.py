@@ -99,6 +99,8 @@ def pad_req(
     kv_lens_pad = torch.cat([kv_local_pad, kv_sp_pad], dim=0)
     block_table_pad = torch.cat([bt_local_pad, bt_sp_pad], dim=0) if block_num > 0 else torch.empty(0, 0, device=device)
 
+    print_shape_log(torch.distributed.get_rank(), f"kv_lens_pad: {kv_lens_pad}, kv_local_pad: {kv_local_pad}, kv_sp_pad: {kv_sp_pad}, cnt_list: {cnt_list}")
+
     return (q_pad, 
             kv_lens_pad, block_table_pad, 
             local_mask, sp_mask, 
@@ -159,7 +161,8 @@ def prepare_mla_fwd(
         num_query_heads=num_query_heads,
         pad_local=pad_local,
         pad_sp=pad_sp,
-        group_size=group_size
+        group_size=group_size,
+        cnt_list=cnt_list
     )
 
     assert q_pad.shape[0] == q_total_pad, \
