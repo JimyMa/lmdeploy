@@ -35,6 +35,7 @@ class ExecutorBase:
         self.tokenizer = tokenizer
         self.dp = dist_config.dp
         self.tp = dist_config.tp
+        self.enable_sp = dist_config.enable_sp
         self.world_size = dist_config.world_size
         self.device_type = device_type
 
@@ -148,12 +149,13 @@ class ExecutorBase:
         model_config = self.model_config
         free_mems = self.gather_free_mem()
         free_mem = min(free_mems)
-        logger.debug(f'minimal free gpu memory: {free_mem >> 20} mb')
+        logger.error(f'minimal free gpu memory: {free_mem >> 20} mb')
         vocal_size = self.model_config.vocab_size
 
         tp = self.dist_config.attn_config.tp
         cache_block_size = CacheEngine.get_cache_block_size(cache_config.block_size, model_config, tp,
                                                             cache_config.quant_policy)
+        logger.error(f"cache_block_size: {cache_block_size}")
         runtime_mem, max_prefill_token_num = self._get_runtime_size(free_mem, cache_block_size, vocal_size)
         if cache_config.max_prefill_token_num != max_prefill_token_num:
             if max_prefill_token_num <= 0:
@@ -166,6 +168,7 @@ class ExecutorBase:
 
         if cache_config.num_gpu_blocks == 0:
             cache_config.num_gpu_blocks = int(available_mem / cache_block_size)
+            logger.error(f"num_gpu_blocks: {cache_config.num_gpu_blocks}")
             if cache_config.num_gpu_blocks <= 0:
                 raise RuntimeError('No enough gpu memory for kv cache.')
         self.set_cache_config(cache_config)

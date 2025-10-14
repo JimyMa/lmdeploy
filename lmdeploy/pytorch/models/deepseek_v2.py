@@ -401,6 +401,10 @@ class DeepseekV2Attention(nn.Module):
         num_key_value_heads = getattr(config, 'num_key_value_heads', 1)
         use_flash_mla = getattr(config, 'use_flash_mla', False)
 
+        # print(f"config: {config}",flush=True)
+
+        # print(f"num_key_value_heads: {num_key_value_heads}",flush=True)
+
         if self.q_lora_rank is None:
             self.q_proj = build_colwise_linear(
                 self.hidden_size,
@@ -883,9 +887,12 @@ class DeepseekV2MLP(nn.Module):
             all_reduce = True
             is_tp = True
 
+        # print(f"config: {config}")
+
         # gate up
         if intermediate_size is None:
             intermediate_size = config.intermediate_size
+
         self.gate_up_proj = build_gateup_linear(
             config.hidden_size,
             [intermediate_size, intermediate_size],
@@ -910,10 +917,13 @@ class DeepseekV2MLP(nn.Module):
             is_tp=is_tp,
             all_reduce=all_reduce,
         )
+        # print(f"is_shared_expert: {is_shared_expert}, self.gate_up_proj: {self.gate_up_proj}")
+        # print(f"is_shared_expert: {is_shared_expert}, self.down_proj: {self.down_proj}")
 
     def forward(self, x, dummy_batch_size: Optional[int] = None):
         """forward."""
         gate_up = self.gate_up_proj(x)
+        # print(f"gate_up output.shape: {gate_up.shape}",flush=True)
         act = self.act_fn(gate_up)
         return self.down_proj(act)
 
@@ -1118,6 +1128,7 @@ class DeepseekV2Model(nn.Module):
                 }
                 yarn_params = YarnParameters(**kwargs)
                 other_params['yarn_params'] = yarn_params
+        print(f"emb_type: {emb_type}")
         self.rotary_emb = build_rotary_embedding(rope_dim,
                                                  rope_max_pos_emb,
                                                  rope_base,
@@ -1145,6 +1156,7 @@ class DeepseekV2Model(nn.Module):
         rotary_pos_emb = (cos, sin)
         for idx, decoder_layer in enumerate(self.layers):
             past_key_value = past_key_values[idx]
+            # print(f"past_key_value.shape: {past_key_value}",flush=True)
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 rotary_pos_emb=rotary_pos_emb,
@@ -1155,6 +1167,8 @@ class DeepseekV2Model(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        print(f"hidden_states.shape: {hidden_states.shape}",flush=True)
 
         return hidden_states
 
@@ -1269,6 +1283,9 @@ class DeepseekV2ForCausalLM(nn.Module, CudaGraphMixin):
         dummy_batch_size: Optional[int] = None,
         **kwargs,
     ):
+        # print(f"input_ids: {input_ids}, dtype: {input_ids.dtype}, device: {input_ids.device}",flush=True)
+        # print(f"position_ids: {position_ids}, dtype: {position_ids.dtype}, device: {position_ids.device}",flush=True)
+        
         if get_step_ctx_manager().current_context().enable_microbatch:
             hidden_states = self.model.forward_microbatch(
                 input_ids=input_ids,
@@ -1286,6 +1303,7 @@ class DeepseekV2ForCausalLM(nn.Module, CudaGraphMixin):
                 inputs_embeds=inputs_embeds,
                 dummy_batch_size=dummy_batch_size,
             )
+        print(f"output hidden_states.shape: {hidden_states.shape}",flush=True)
         return hidden_states
 
     def get_logits(self, hidden_states: torch.Tensor):

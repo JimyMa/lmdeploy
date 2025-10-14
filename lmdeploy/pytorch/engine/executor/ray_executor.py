@@ -261,6 +261,7 @@ class RayWorkerWrapper(WorkerWrapperBase):
                                                    dtype=dtype,
                                                    hf_overrides=misc_config.hf_overrides,
                                                    dist_config=dist_config)
+        # print(f"config: {model_config}")
 
         super().__init__(
             model_path=model_path,
@@ -313,7 +314,7 @@ class RayWorkerWrapper(WorkerWrapperBase):
         """Exit actor."""
         ray.actor.exit_actor()
 
-
+# TODO: 修改对DP判断的逻辑，问下宁胜，启动server的逻辑，DP*TP=World
 class RayExecutor(ExecutorBase):
     """Ray executor."""
 
@@ -338,7 +339,6 @@ class RayExecutor(ExecutorBase):
                          tokenizer=tokenizer,
                          adapters=adapters,
                          device_type=device_type)
-
         self.dp_rank = dist_config.dp_rank
         device_ctx = DeviceContext(device_type)
         with get_device_manager().context(device_ctx):
@@ -373,8 +373,10 @@ class RayExecutor(ExecutorBase):
 
             logger.info('Init ray workers.')
             self.workers = self._init_workers_ray(placement_group, worker_kwargs)
+            self._worker_queues: List[asyncio.Queue] = [asyncio.Queue() for _ in self.workers]
             self.dag = None
             self._prefetch_task: asyncio.Task = None
+            self._worker_fetch_tasks: List[asyncio.Task] = []
             self.remote_outs: asyncio.Queue = None
 
             logger.info('Init distributed environment by device.')
@@ -440,10 +442,65 @@ class RayExecutor(ExecutorBase):
     def get_input_processor(self):
         """Build cache engine."""
         return ray.get(self.workers[0].get_input_processor.remote())
+    
+    async def _fetch_worker_outputs(self, worker_idx: int):
+        """Fetch outputs from a specific worker and put them into its queue."""
+        logger.error(f"worker_idx: {worker_idx}")
+        queue = self._worker_queues[worker_idx]
+
+        while True:
+            try:
+                outs = await self.workers[worker_idx].get_outputs.remote()
+                logger.error(f'***** worker[{worker_idx}] Receive outs: {outs}')
+                logger.debug(f'Receive {len(outs)} outputs from worker[{worker_idx}].')
+                for out in outs:
+                    await queue.put(out)
+            except Exception as e:
+                logger.error(f'Error fetching outputs from worker[{worker_idx}]: {e}')
+                await asyncio.sleep(0.1)  # Avoid frequent error reporting
+
+    async def _merge_outputs(self):
+        """Merge outputs from all worker queues using blocking waits."""
+        while True:
+            try:
+                # pending_tasks = [asyncio.create_task(queue.get()) for queue in self._worker_queues]
+                pending_tasks = [asyncio.create_task(self._worker_queues[0].get())]
+
+                first_elements = await asyncio.gather(*pending_tasks)
+                
+                logger.error(f"All queues have data, starting merge")
+                
+                min_queue_size = 1
+                remaining_sizes = [queue.qsize() for queue in self._worker_queues]
+                if remaining_sizes:
+                    min_queue_size += min(remaining_sizes)
+                
+                batch_outs = []
+                for i, queue in enumerate(self._worker_queues):
+                    worker_outs = [first_elements[i]]
+                    for _ in range(min_queue_size - 1):
+                        worker_outs.append(await queue.get())
+                    batch_outs.append(worker_outs)
+                
+                logger.error(f"ray_executor.py batch_outs: {batch_outs}")
+                
+                # 合并所有worker的输出
+                for i in range(min_queue_size):
+                    out = batch_outs[i][0]  # 这里保留原逻辑，仅取第0个worker的输出
+                    for k, v in out.items():
+                        if isinstance(v, np.ndarray):
+                            out[k] = torch.from_numpy(v)
+                    self.remote_outs.put_nowait(out)
+                    
+            except Exception as e:
+                logger.error(f"Error in _merge_outputs: {e}")
+                # 短暂等待后重试，避免出错后无限循环
+                await asyncio.sleep(0.01)
 
     async def _prefetch_outputs(self):
         while True:
             outs = await self.workers[0].get_outputs.remote()
+            # logger.error(f'***** worker[0] Receive outs: {outs}')
             logger.debug(f'Receive {len(outs)} outputs from worker[0].')
             for out in outs:
                 # pack pytorch
@@ -470,6 +527,19 @@ class RayExecutor(ExecutorBase):
         self.remote_outs = asyncio.Queue()
         event_loop = asyncio.get_event_loop()
         logger.info('Starting async task RayPrefetchOutput loop.')
+        
+        # if self.enable_sp:
+        #     # Start tasks to fetch outputs from each worker
+        #     for i in range(len(self.workers)):
+        #         task = event_loop.create_task(
+        #             self._fetch_worker_outputs(i), 
+        #             name=f'RayWorkerFetchOutput_{i}'
+        #         )
+        #         task.add_done_callback(self._prefetch_task_callback)
+        #         self._worker_fetch_tasks.append(task)
+        #     self._prefetch_task = event_loop.create_task(self._merge_outputs(), name='RayExecutorMergeOutputs')
+        #     self._prefetch_task.add_done_callback(self._prefetch_task_callback)
+        # else:
         self._prefetch_task = event_loop.create_task(self._prefetch_outputs(), name='RayExecutorPrefetchOutput')
         self._prefetch_task.add_done_callback(self._prefetch_task_callback)
 

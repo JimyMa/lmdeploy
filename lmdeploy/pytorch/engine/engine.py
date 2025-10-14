@@ -220,6 +220,7 @@ class InputsMakerAsync(InputsMakerBase):
 
         self.dp = self.engine.dist_config.dp
         self.role = self.engine.cache_config.role
+        self.enable_sp = self.engine.dist_config.enable_sp
 
         self.next_is_prefill = True
         if self.dp == 1:
@@ -257,6 +258,16 @@ class InputsMakerAsync(InputsMakerBase):
         # decoding
         return False
 
+    def make_sp_forward_inputs(self, forward_inputs: Dict[str, Any], world_size: int) -> List[Dict[str, Any]]:
+        """
+        构造一个长度为 world_size 的列表。
+        第 0 个元素为 forward_inputs，
+        其余元素为 {'is_empty': True}。
+        """
+        if world_size <= 0:
+            raise ValueError("world_size must be positive")
+        return [forward_inputs] + [{'is_empty': True} for _ in range(world_size - 1)]
+
     async def _send_next_inputs_impl(self, prefill: bool = None, enable_empty: bool = False):
         forward_inputs = self._make_forward_inputs(prefill, enable_empty)
         if forward_inputs is None:
@@ -268,7 +279,11 @@ class InputsMakerAsync(InputsMakerBase):
             session_ids = [seq.session_id for seq in next_running]
             logger.debug(f'Forward session_ids: {session_ids}')
         self.next_is_prefill = inputs.is_decoding
-        await self.executor.forward_async(forward_inputs)
+        if self.enable_sp:
+            dummy_forward_inputs = self.make_sp_forward_inputs(forward_inputs,8)
+            await self.executor.forward_async(dummy_forward_inputs)
+        else:
+            await self.executor.forward_async(forward_inputs)
         self.forward_inputs = forward_inputs
         return forward_inputs, next_running
 

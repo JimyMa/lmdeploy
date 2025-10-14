@@ -20,6 +20,7 @@ import sys
 import time
 import traceback
 import warnings
+import math
 from argparse import ArgumentParser
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -209,6 +210,7 @@ async def async_request_openai_completions(
         itl = []
         last_token_idx=0
         most_recent_timestamp = st
+        print(f"payload: {payload}")
         try:
             async with session.post(url=api_url, json=payload, headers=headers) as response:
             # session = await get_session()
@@ -517,8 +519,8 @@ def sample_unbalance_requests(small_input_len: int, small_output_len: int,
     return result
 
 def sample_mix_datasets_requests(
-    long_dataset_path: str = "/nvme4/share/chenjiefei/dataset/filtered_medha/gemini_issues_processed_data.json",
-    short_dataset_path: str = "/nvme4/share/chenjiefei/dataset/tokenized_sharegpt/sharegpt_data_filtered.json",
+    long_dataset_path: str = "/nvme2/share/chenjiefei/dataset/filtered_medha/gemini_issues_processed_data.json",
+    short_dataset_path: str = "/nvme2/share/chenjiefei/dataset/tokenized_sharegpt/sharegpt_data_filtered.json",
     total_requests: int = 10000,
     long_ratio: float = 0.01  # 1%的长请求比例
 ) -> List[Tuple[str, int, int]]:
@@ -565,6 +567,72 @@ def sample_mix_datasets_requests(
             long_counter -= 1
     
     return result
+
+# def sample_mix_datasets_requests(
+#     long_dataset_path: str = "/nvme2/share/chenjiefei/dataset/filtered_medha/gemini_issues_processed_data.json",
+#     short_dataset_path: str = "/nvme2/share/chenjiefei/dataset/tokenized_sharegpt/sharegpt_data_filtered.json",
+#     total_requests: int = 10000,
+#     long_ratio: float = 0.01  # 1%的长请求比例
+# ) -> List[Tuple[str, int, int]]:
+#     """
+#     混合长输入数据集和短输入数据集，按照指定比例生成请求列表，并对长请求进行拆分处理
+    
+#     参数:
+#         long_dataset_path: 长输入数据集的路径
+#         short_dataset_path: 短输入数据集的路径
+#         total_requests: 总共生成的请求数量
+#         long_ratio: 长请求的比例
+        
+#     返回:
+#         包含请求信息的列表，每个元素为('', prompt_len, output_len)元组，其中长请求已按45000粒度拆分
+#     """
+#     # 读取长输入数据集
+#     with open(long_dataset_path, 'r', encoding='utf-8') as f:
+#         long_dataset = json.load(f)
+    
+#     # 读取短输入数据集
+#     with open(short_dataset_path, 'r', encoding='utf-8') as f:
+#         short_dataset = json.load(f)
+    
+#     result: List[Tuple[str, int, int]] = []
+#     long_interval = round(1 / long_ratio)  # 计算长请求之间的间隔
+#     long_counter = 0  # 用于跟踪下一个长请求的位置
+#     long_idx = 0  # 长数据集索引
+#     short_idx = 0  # 短数据集索引
+#     long_len = len(long_dataset)
+#     short_len = len(short_dataset)
+    
+#     for i in range(total_requests):
+#         if long_counter == 0:
+#             # 插入长请求，循环使用长数据集
+#             data = long_dataset[long_idx % long_len]
+#             result.append(('', data['prompt_len'], data['output_len']))
+#             long_idx += 1
+#             long_counter = long_interval - 1
+#         else:
+#             # 插入短请求，循环使用短数据集
+#             data = short_dataset[short_idx % short_len]
+#             result.append(('', data['prompt_len'], data['output_len']))
+#             short_idx += 1
+#             long_counter -= 1
+    
+#     # 新增：对生成的数据集进行后处理，拆分长请求
+#     processed_result: List[Tuple[str, int, int]] = []
+#     for item in result:
+#         _, prompt_len, output_len = item
+        
+#         # 以45000为粒度进行拆分
+#         if prompt_len > 45000:
+#             split_count = math.ceil(prompt_len / 45000)
+#             split_prompt_len = math.ceil(prompt_len / split_count)
+#             split_output_len = math.ceil(output_len / split_count)
+            
+#             for _ in range(split_count):
+#                 processed_result.append(('', split_prompt_len, split_output_len))
+#         else:
+#             processed_result.append(item)
+    
+#     return processed_result
 
 def sample_sharegpt_requests(
     dataset_path: str,
@@ -992,7 +1060,7 @@ async def benchmark(
 def save_request_details(request_ids: List[int], outputs: List[RequestFuncOutput], base_dir: str = None):
     """保存每个请求的详细指标到指定目录的CSV文件"""
     # 设置默认目录
-    default_dir = "/nvme4/share/chenjiefei/scripts/csv/"
+    default_dir = "/nvme2/share/chenjiefei/scripts/csv/"
     target_dir = base_dir or default_dir
     
     # 确保目录存在
@@ -1171,14 +1239,14 @@ def run_benchmark(args_: argparse.Namespace):
             long_input_len=340000,
             long_output_len=200,
             num_prompts=args.num_prompts,
-            long_ratio=0.002,
+            long_ratio=0.0015,
         )
     elif args.dataset_name == 'mix_datasets':
         input_requests = sample_mix_datasets_requests(
-            long_dataset_path="/nvme4/share/chenjiefei/dataset/filtered_medha/gemini_issues_processed_data.json",
-            short_dataset_path="/nvme4/share/chenjiefei/dataset/tokenized_sharegpt/sharegpt_data_filtered.json",
-            num_prompts=args.num_prompts,
-            long_ratio=0.01,
+            long_dataset_path="/nvme2/share/chenjiefei/dataset/filtered_medha/gemini_issues_processed_data.json",
+            short_dataset_path="/nvme2/share/chenjiefei/dataset/tokenized_sharegpt/sharegpt_data_filtered.json",
+            total_requests=args.num_prompts,
+            long_ratio=0.02,
         )
     else:
         raise ValueError(f'Unknown dataset: {args.dataset_name}')

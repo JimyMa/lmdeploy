@@ -288,6 +288,8 @@ class BaseModelAgent:
         self.cache_engine = None
         self.profiler: AgentProfiler = None
 
+        self.enable_sp = self.dist_ctx.enable_sp
+
         # microbatch
         self.enable_microbatch = self.dist_ctx.dist_config.enable_microbatch
         self.enable_microbatch_prefill_batchsize_threshold = \
@@ -476,6 +478,7 @@ class BaseModelAgent:
         event = torch.cuda.Event()
         event.record()
         output['event'] = event
+        print(f"RANK{self.rank} call self._out_que.put_nowait",flush=True)
         self._out_que.put_nowait(output)
 
     def _broadcast_next_token(self, next_token_ids: torch.Tensor, dist_ctx: DistContext = None):
@@ -529,9 +532,14 @@ class BaseModelAgent:
         @asynccontextmanager
         async def __prepare_dp():
             """Prepare dp."""
-            if dp == 1:
+            if not self.enable_sp and dp == 1:
                 yield
                 return
+            
+            if self.enable_sp:
+                world_size = tp
+            else:
+                world_size = dp
 
             nonlocal inputs, sync_long_context, is_all_dummy
 
@@ -551,7 +559,10 @@ class BaseModelAgent:
                         self.enable_microbatch_prefill_batchsize_threshold and \
                         tokens_num >= self.enable_microbatch_prefill_token_threshold
                 dp_forward_meta.append(int(enable_microbatch))
-            gathered_meta = DistGatherScalar(dp_forward_meta, dp, device='cuda')
+            if self.enable_sp:
+                gathered_meta = DistGatherScalar(dp_forward_meta, world_size, device='cuda')
+            else:
+                gathered_meta = DistGatherScalar(dp_forward_meta, world_size, device='cuda')
 
             yield
 
@@ -559,7 +570,7 @@ class BaseModelAgent:
 
             # check is_decoding
             all_is_decoding = gathered_meta[:, 0]
-            assert all_is_decoding.sum().item() in [0, dp]
+            assert all_is_decoding.sum().item() in [0, world_size]
 
             # check if all inputs are dummy inputs
             is_all_dummy = gathered_meta[:, 1].all()
@@ -569,14 +580,15 @@ class BaseModelAgent:
             # 先算 global batch size
             global_batch_size = 0
             max_batch_size = 0
-            for i in range(dp):
+            
+            for i in range(world_size):
                 batch_size = 0 if gathered_meta[i, 1] else gathered_meta[i, 2]
                 global_batch_size += batch_size
                 max_batch_size = max(max_batch_size,batch_size)
 
             # 计算当前 rank 该拿的 batch size
-            base = global_batch_size // dp
-            rem  = global_batch_size % dp
+            base = global_batch_size // world_size
+            rem  = global_batch_size % world_size
             batch_size_per_rank = base + (1 if rank < rem else 0)
             inputs.dummy_batch_size = max(batch_size_per_rank,1)
 
@@ -600,7 +612,7 @@ class BaseModelAgent:
             if rank == 0:
                 timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # 保留毫秒
                 log_message = f"Timestamp: {timestamp},Rank,Batch Size,Num Waiting,KV Cache Usage"
-                for i in range(dp):
+                for i in range(world_size):
                     batch_size = 0 if gathered_meta[i, 1] else gathered_meta[i, 2]
                     log_message += f",{i},{batch_size},{gathered_meta[i, 4]},{gathered_meta[i, 5]/10000:.3f}"
                 print(log_message, flush=True)
@@ -625,6 +637,8 @@ class BaseModelAgent:
             inputs.build_dp_meta()
             # inputs = self.patched_model.update_inputs(inputs)
 
+            # logger.error(f"RANK{torch.distributed.get_rank()} call __prepare_dp end")
+
         # dist tools
         dist_ctx = get_dist_manager().current_context()
         rank = dist_ctx.rank
@@ -643,12 +657,14 @@ class BaseModelAgent:
         async with __prepare_dp():
             pass
 
-        need_output = dp > 1 or rank % tp == 0
+        need_output = (dp > 1 or rank % tp == 0) if not self.enable_sp else True
 
         # skip dummy forward.
         if is_all_dummy:
             logger.debug(f'<ForwardTask> rank[{rank}]: all inputs are dummy, skip forward.')
             return
+        
+        print(f"RANK{self.rank} call __prepare_dp 0921",flush=True)
 
         for idx in range(loop_count):
             # inference
@@ -663,9 +679,18 @@ class BaseModelAgent:
             logits = output['logits']
             logits = logits[0]  # [bs, seq, prob] -> [seq, prob]
 
+            logger.err(f"RANK{self.rank} idx{idx} logits.shape: {logits.shape}")
+
+            # logger.error(f"RANK{self.tp_rank} is_dummy: {is_dummy}, batch size: {inputs.seq_length.size(0)}, logits: {logits.shape} need output: {need_output}")
+
             # output empty for dummy inputs
             if is_dummy:
-                continue
+                if not self.enable_sp:
+                    continue
+                else:
+                    print(f"RANK{self.rank} call model_agent.py _push_output 0921")
+                    self._push_output(dict(dummy=True))
+                    continue
 
             # sampling and stopping
             if need_output:
@@ -684,18 +709,19 @@ class BaseModelAgent:
                 with torch.inference_mode():
                     next_token_ids = torch.zeros_like(num_ignore_eos)
 
-            # broadcast next token for TP > 1
-            need_broadcast_next = (dp == 1 and tp > 1 and idx < loop_count - 1)
-            if need_broadcast_next:
-                logger.debug(f'<ForwardTask> rank[{rank}]: synchornize token ids [{idx}]')
-                next_token_ids = self._broadcast_next_token(next_token_ids, dist_ctx)
+            # # broadcast next token for TP > 1
+            # need_broadcast_next = (dp == 1 and tp > 1 and idx < loop_count - 1)
+            # if need_broadcast_next:
+            #     logger.debug(f'<ForwardTask> rank[{rank}]: synchornize token ids [{idx}]')
+            #     next_token_ids = self._broadcast_next_token(next_token_ids, dist_ctx)
 
             # send output
             model_metas = output.get('model_metas')
             if need_output:
-                logger.debug(f'<ForwardTask> rank[{rank}]: Output [{idx}]')
+                logger.error(f'<ForwardTask> rank[{rank}]: Output [{idx}] 0921')
                 self._push_output(
-                    dict(next_token_ids=next_token_ids,
+                    dict(dummy=False,
+                         next_token_ids=next_token_ids,
                          logits=logits if return_logits else None,
                          stopped=stopped,
                          model_metas=model_metas))
@@ -710,11 +736,14 @@ class BaseModelAgent:
             dist_ctx = get_dist_manager().current_context()
             dp = dist_ctx.dp
 
-            # for dp
-            if dp > 1:
-                input_maker = DPForwardInputsMaker(self)
+            if self.enable_sp:
+                input_maker = SPForwardInputsMaker(self)
             else:
-                input_maker = DefaultForwardInputsMaker(self)
+                # for dp
+                if dp > 1:
+                    input_maker = DPForwardInputsMaker(self)
+                else:
+                    input_maker = DefaultForwardInputsMaker(self)
 
             while True:
                 forward_inputs = await input_maker.get()
@@ -733,15 +762,20 @@ class BaseModelAgent:
         keys = ['inputs', 'all_ids', 'guided_input_ids', 'sampling_inputs', 'num_appendable_ids', 'num_ignore_eos']
         while True:
             forward_inputs = await self._pre_in_que.get()
+            if self.enable_sp:
+                forward_inputs = forward_inputs[self.tp_rank]
 
-            logger.debug('preprocessing forward inputs.')
-            with torch.cuda.stream(self.out_stream), torch.inference_mode(), record_function('inputs_H2D'):
-                for k in keys:
-                    if k not in forward_inputs:
-                        continue
-                    forward_inputs[k] = _try_to_cuda(forward_inputs[k], non_blocking=non_blocking)
-                self.out_stream.synchronize()
-            logger.debug('preprocessing forward inputs done.')
+            if not self.enable_sp or (self.enable_sp and "is_empty" not in forward_inputs):
+
+                logger.debug('preprocessing forward inputs.')
+                with torch.cuda.stream(self.out_stream), torch.inference_mode(), record_function('inputs_H2D'):
+                    for k in keys:
+                        if k not in forward_inputs:
+                            continue
+                        forward_inputs[k] = _try_to_cuda(forward_inputs[k], non_blocking=non_blocking)
+                    self.out_stream.synchronize()
+                logger.debug('preprocessing forward inputs done.')
+
             self._in_que.put_nowait(forward_inputs)
 
     @staticmethod
@@ -851,6 +885,11 @@ class BaseModelAgent:
         event = out.pop('event')
         while not event.query():
             await asyncio.sleep(0.001)
+
+        if self.enable_sp:
+            if out["dummy"]:
+                return out
+                    
         with torch.cuda.stream(self.out_stream), torch.inference_mode(), record_function('outputs_D2H'):
             out['next_token_ids'] = out['next_token_ids'].cpu()
             out['stopped'] = out['stopped'].cpu()
@@ -1070,6 +1109,58 @@ class DPForwardInputsMaker:
             forward_inputs = self._make_dummy_forward_inputs()
 
         self._update_is_decoding(forward_inputs)
+
+        return forward_inputs
+
+    def step(self):
+        """step."""
+        self._ready_event = torch.cuda.Event()
+        self._ready_event.record()
+
+class SPForwardInputsMaker:
+    """Dp forward inputs maker."""
+
+    def __init__(self, model_agent: BaseModelAgent):
+        self.model_agent = model_agent
+        self.dist_ctx = model_agent.dist_ctx
+        self.model_config = model_agent.model_config
+        self.cache_config = model_agent.cache_config
+        self.misc_config = model_agent.misc_config
+        self.device = model_agent.device
+        self._in_que = model_agent._in_que
+
+        # maker metas
+        self._next_inputs = None
+        self._is_decoding = True
+        self._ready_event = torch.cuda.Event()
+
+    def _make_dummy_forward_inputs(self):
+        """Make dummy forward inputs."""
+        is_decoding = self._is_decoding
+        loop_count = self.misc_config.prefill_interval if is_decoding else 1
+        dist_config = self.dist_ctx.dist_config
+        batch_size = 2 if dist_config.enable_microbatch else 1
+        batch_size = min(self.cache_config.max_batches, batch_size)
+        model_inputs = ModelInputs.make_dummy(batch_size,
+                                              is_decoding,
+                                              device=self.device,
+                                              vocab_size=self.model_config.vocab_size)
+        forward_inputs = dict(
+            inputs=model_inputs,
+            loop_count=loop_count,
+            is_dummy=True,
+            sync_long_context=False,
+            num_waiting=0,
+            kv_cache_usage=0.00,
+        )
+        return forward_inputs
+
+    async def get(self):
+        """get."""
+        forward_inputs = await self._in_que.get()
+        if "is_empty" in forward_inputs:
+            forward_inputs = self._make_dummy_forward_inputs()
+            logger.error("call class SPForwardInputsMaker _make_dummy_forward_inputs")
 
         return forward_inputs
 

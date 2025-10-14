@@ -50,6 +50,7 @@ class Status(BaseModel):
 class Node(BaseModel):
     """Node protocol consists of url and status."""
     url: str
+    dp_rank: int
     status: Optional[Status] = None
 
 

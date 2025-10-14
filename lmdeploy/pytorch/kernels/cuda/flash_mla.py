@@ -3,6 +3,11 @@ from typing import Optional, Tuple
 
 import torch
 
+from lmdeploy.utils import get_logger
+
+logger = get_logger('lmdeploy')
+
+torch.set_printoptions(threshold=float('inf'))
 
 def flash_mla_fwd(
     q: torch.Tensor,
@@ -30,8 +35,36 @@ def flash_mla_fwd(
     Return:
         out: (batch_size, num_heads_q, head_dim_v).
     """
+
+    # logger.error(f"call flash_mla.py flash_mla_fwd")
+
+    # ===== 打印入参（带 RANK 信息） =====
+    # try:
+    #     rank = torch.distributed.get_rank()
+    # except (RuntimeError, ValueError):
+    #     # 未初始化分布式或单卡情况下
+    #     rank = 0
+
+    # print(f"[RANK{rank}] [flash_mla_fwd] block_table:\n{block_table}", flush=True)
+    # print(f"[RANK{rank}] [flash_mla_fwd] cache_seqlens:\n{cache_seqlens}", flush=True)
+
+    # import inspect
+    # frame = inspect.currentframe()
+    # args, _, _, values = inspect.getargvalues(frame)
+    # for name in args:
+    #     val = values[name]
+    #     prefix = f"[RANK{rank}] [flash_mla_fwd] {name}:"
+    #     if isinstance(val, torch.Tensor):
+    #         print(f"{prefix} Tensor, dtype={val.dtype}, shape={tuple(val.shape)}",flush=True)
+    #     else:
+    #         print(f"{prefix} {val}",flush=True)
+    # ====================================
+
     import flash_mla
-    out, _ = flash_mla.flash_mla_with_kvcache(
+
+    # print(f"q.shape: {q.shape}, k_cache.shape: {k_cache.shape}, block_table.shape: {block_table.shape}, cache_seqlens: {cache_seqlens}, head_dim_v: {head_dim_v}")
+
+    out, lse = flash_mla.flash_mla_with_kvcache(
         q,
         k_cache,
         block_table,
@@ -42,4 +75,10 @@ def flash_mla_fwd(
         softmax_scale,
         causal,
     )
+
+    # ===== 打印返回值（带 RANK 信息） =====
+    # print(f"[RANK{rank}] [flash_mla_fwd] return out: Tensor, dtype={out.dtype}, shape={tuple(out.shape)}",flush=True)
+    # print(f"[RANK{rank}] [flash_mla_fwd] return lse: Tensor, dtype={lse.dtype}, shape={tuple(lse.shape)}",flush=True)
+    # =====================================
+
     return out.squeeze(1)
