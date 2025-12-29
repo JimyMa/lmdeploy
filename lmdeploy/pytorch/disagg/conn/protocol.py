@@ -4,8 +4,12 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
-from lmdeploy.pytorch.disagg.config import (DistServeEngineConfig, DistServeNVLinkConfig, DistServeRDMAConfig,
-                                            DistServeTCPConfig)
+from lmdeploy.pytorch.disagg.config import (
+    DistServeEngineConfig,
+    DistServeNVLinkConfig,
+    DistServeRDMAConfig,
+    DistServeTCPConfig,
+)
 
 
 class MigrationProtocol(enum.Enum):
@@ -39,11 +43,11 @@ class DistServeInitRequest(BaseModel):
 
     protocol: MigrationProtocol
 
-    rank: Optional[int] = None
+    rank: int = 0
 
-    tcp_config: Optional[DistServeTCPConfig] = None
-    rdma_config: Optional[DistServeRDMAConfig] = None
-    nvlink_config: Optional[DistServeNVLinkConfig] = None
+    tcp_config: DistServeTCPConfig = DistServeTCPConfig()
+    rdma_config: DistServeRDMAConfig = DistServeRDMAConfig()
+    nvlink_config: DistServeNVLinkConfig = DistServeNVLinkConfig()
 
 
 class DistServeEngineEndpointInfo(BaseModel):

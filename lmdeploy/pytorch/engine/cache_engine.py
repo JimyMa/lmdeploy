@@ -406,7 +406,7 @@ class CacheEngine:
                 continue
             register_mr_request = DistServeRegisterMRMessage(protocol=migration_init_request.protocol,
                                                              remote_engine_id=migration_init_request.remote_engine_id,
-                                                             mr_key=str(i),
+                                                             mr_key=i,
                                                              addr=t.data_ptr(),
                                                              offset=t.storage_offset(),
                                                              length=t.numel() * t.itemsize)

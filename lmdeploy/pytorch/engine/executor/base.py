@@ -116,7 +116,7 @@ class ExecutorBase:
         """Init rdma link."""
         raise NotImplementedError('Not implemented')
 
-    def p2p_connect(self, conn_request: List[DistServeKVTransferEndpointInfo]):
+    def p2p_connect(self, remote_engine_id: str, conn_request: List[DistServeKVTransferEndpointInfo]):
         """rdma_connect."""
         raise NotImplementedError('Not Implemented')
 

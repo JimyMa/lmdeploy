@@ -33,9 +33,9 @@ First deploy your prefill and decode engines.
 
 ```shell
 # Prefill Engine
-CUDA_VISIBLE_DEVICES=0 lmdeploy serve api_server internlm/internlm2_5-7b-chat --server-port 23333 --role Prefill --proxy-url http://0.0.0.0:8000 --backend pytorch
+CUDA_VISIBLE_DEVICES=0 SLIME_VISIBLE_DEVICES=mlx5_0 lmdeploy serve api_server /models/qwen3-8b-deepseek-r1 --server-port 23333 --role Prefill --proxy-url http://0.0.0.0:8000 --backend pytorch
 # Decode Engine
-CUDA_VISIBLE_DEVICES=1 lmdeploy serve api_server internlm/internlm2_5-7b-chat --server-port 23334 --role Decode --proxy-url http://0.0.0.0:8000 --backend pytorch
+CUDA_VISIBLE_DEVICES=1 SLIME_VISIBLE_DEVICES=mlx5_1 lmdeploy serve api_server /models/qwen3-8b-deepseek-r1 --server-port 23334 --role Decode --proxy-url http://0.0.0.0:8000 --backend pytorch
 ```
 
 By now, only **Pytorch backend** supports PD Disaggregation.
@@ -46,7 +46,7 @@ By now, only **Pytorch backend** supports PD Disaggregation.
 # API Invoke
 curl -X POST "http://localhost:8000/v1/completions" \
 -H "Content-Type: application/json" \
--d '{"model": "internlm/internlm2_5-7b-chat", "temperature":0, "prompt": "Shanghai is a city that ", "max_tokens": 16, "stream": false}'
+-d '{"model": "/models/qwen3-8b-deepseek-r1", "temperature":0, "prompt": "Shanghai is a city that ", "max_tokens": 16, "stream": false}'
 # Output
 {
   "id":"2",

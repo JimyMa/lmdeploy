@@ -416,14 +416,551 @@ class Engine(EngineBase):
         """Model config."""
         return self.executor.model_config
 
-    async def p2p_initialize(self, init_request: DistServeInitRequest):
-        return await self.engine_conn.p2p_initialize(init_request)
+    @property
+    def gpu_count(self):
+        return self.tp * self.dp
+
+    @property
+    def torch_int_dtype(self):
+        """Return int32 for cuda, int64 for others."""
+        if self.executor.device_type == 'cuda':
+            return torch.int32
+        return torch.int64
+
+    def _create_vision_model_inputs(self, messages: SeqList, model_inputs: ModelInputs):
+        """Create vision model inputs."""
+        batch_size = len(messages)
+
+        def __get_vlm_embeddings():
+            """Get vlm input embeddings and indexings."""
+            max_q_seq_length = model_inputs.seq_length.max().item()
+            input_embeddings = [[
+                emb.embeddings if isinstance(emb.embeddings, torch.Tensor) else torch.as_tensor(emb.embeddings)
+                for emb in msg.input_embeddings
+            ] for msg in messages]
+            input_embedding_ranges = [
+                torch.tensor([[emb.start, emb.end] for emb in msg.input_embeddings]) for msg in messages
+            ]
+            input_embedding_indexing = torch.zeros((batch_size, max_q_seq_length), dtype=torch.bool)
+            for msg_id, msg in enumerate(messages):
+                for emb in msg.input_embeddings:
+                    # make slice index relative to embeddings
+                    emb_start = emb.start - msg.history_len
+                    emb_end = emb.end - msg.history_len
+                    input_embedding_indexing[msg_id][emb_start:emb_end] = True
+            return (input_embeddings, input_embedding_indexing, input_embedding_ranges)
+
+        def __has_values(input_multimodals):
+            for input_mm in input_multimodals:
+                for val in input_mm.values():
+                    if len(val) > 0:
+                        return True
+            return False
+
+        has_embedding = any([len(msg.history_embeddings) > 0 for msg in messages])
+        if has_embedding:
+            has_embedding = any([len(msg.input_embeddings) > 0 for msg in messages])
+
+        has_multimodal = any([not msg.history_multimodals.empty() for msg in messages])
+        input_multimodals = None
+        if has_multimodal:
+            input_multimodals = [msg.get_input_multimodals() for msg in messages]
+            has_multimodal = __has_values(input_multimodals)
+            if not has_multimodal:
+                # no multimodal inputs
+                input_multimodals = None
+
+        if not has_embedding and not has_multimodal:
+            # no vision inputs
+            return None
+
+        if has_embedding:
+            # for inputs with embeddings
+            (input_embeddings, input_embedding_indexing, input_embedding_ranges) = __get_vlm_embeddings()
+        else:
+            input_embeddings = None
+            input_embedding_indexing = None
+            input_embedding_ranges = None
+
+        history_lengths = model_inputs.history_lengths
+        vision_embedding_inputs = VisionModelInputs(history_lengths=history_lengths,
+                                                    input_embeddings=input_embeddings,
+                                                    input_embedding_indexing=input_embedding_indexing,
+                                                    input_embedding_ranges=input_embedding_ranges,
+                                                    input_multimodals=input_multimodals)
+        return vision_embedding_inputs
+
+    @torch.inference_mode()
+    @logging_timer('CreateModelInputs', logger)
+    def create_model_inputs(self, messages: SeqList, is_prefill: bool):
+        """Create model inputs from messages.
+
+        Args:
+            messages (SeqList): The input messages.
+        """
+        batch_size = len(messages)
+        # history lengths
+        history_lengths = torch.tensor([msg.history_len for msg in messages])
+
+        # input ids
+        token_ids = [msg.token_ids for msg in messages]
+        input_ids = torch.as_tensor(np.concatenate(token_ids))[None]
+
+        # seqlens
+        is_decoding = not is_prefill
+        if not is_decoding:
+            seq_length = [len(tokens) for tokens in token_ids]
+            seq_length = torch.tensor(seq_length, dtype=torch.long)
+            max_q_seqlen = seq_length.max().item()
+        else:
+            seq_length = torch.ones(batch_size, dtype=torch.long)
+            max_q_seqlen = 1
+        kv_seqlens = seq_length + history_lengths
+        max_kv_seqlen = kv_seqlens.max().item()
+        sum_kv_seqlen = kv_seqlens.sum().item()
+
+        # block offsets
+        block_offsets = self.scheduler.get_block_tables(messages)
+        block_offsets = _tensorlize_block_offsets(block_offsets, dtype=self.torch_int_dtype)
+
+        # num_ignored_history
+        num_ignored_history = torch.tensor([msg.num_ignored_history for msg in messages])
+
+        # model_metas
+        model_metas = [msg.model_meta for msg in messages]
+
+        # create model inputs for all required fields
+        model_inputs = ModelInputs(
+            input_ids=input_ids,
+            seq_length=seq_length,
+            history_lengths=history_lengths,
+            block_offsets=block_offsets,
+            is_decoding=is_decoding,
+            num_ignored_history=num_ignored_history,
+            max_q_seqlen=max_q_seqlen,
+            max_kv_seqlen=max_kv_seqlen,
+            sum_kv_seqlen=sum_kv_seqlen,
+            model_metas=model_metas,
+        )
+
+        # adapters
+        local_adapter_ids = None
+        if self.adapter_manager.num_adapters() > 1:
+            adapter_names = [msg.adapter_name for msg in messages]
+            local_adapter_ids = self.adapter_manager.get_adapter_ids(adapter_names)
+            local_adapter_ids = seq_length.new_tensor(local_adapter_ids)
+            model_inputs.local_adapter_ids = local_adapter_ids
+
+        # cross for mllama
+        cross_length = torch.tensor([msg.num_cross for msg in messages])
+        history_cross_length = torch.tensor([msg.num_history_cross for msg in messages])
+        if (cross_length + history_cross_length).max().item() > 0:
+            model_inputs.cross_length = cross_length
+            model_inputs.history_cross_length = history_cross_length
+
+        # vision inputs
+        vision_model_inputs = self._create_vision_model_inputs(messages, model_inputs)
+        model_inputs.vision_inputs = vision_model_inputs
+
+        return model_inputs
+
+    def update_running(self, running: SeqList, next_token_ids: torch.Tensor, stopped: torch.Tensor,
+                       model_metas: List[Dict[str, Any]]):
+        """Update scheduler."""
+        if model_metas is None:
+            model_metas = [None] * len(running)
+        next_token_ids = next_token_ids.numpy()
+        for token, msg, stop, model_meta in zip(next_token_ids, running, stopped, model_metas):
+            if msg.status != MessageStatus.LOCKED:
+                continue
+            update_token = token
+
+            # fill token
+            msg.update_token_ids(update_token, model_meta=model_meta)
+            msg.num_new_tokens += 1
+            if stop:
+                msg.status = MessageStatus.TO_BE_MIGRATED if msg.preserve_cache else MessageStatus.STOPPED
+
+    def update_running_migration(self, running: SeqList, next_token_ids: np.ndarray, stopped: torch.Tensor,
+                                 model_metas: List[Dict[str, Any]]):
+        """Update scheduler."""
+        if model_metas is None:
+            model_metas = [None] * len(running)
+        for token, msg, stop, model_meta in zip(next_token_ids, running, stopped, model_metas):
+            if msg.status != MessageStatus.MIGRATION_LOCKED:
+                continue
+            update_token = token
+
+            # fill token
+            msg.update_token_ids(update_token, model_meta=model_meta)
+            msg.num_new_tokens += 1
+            if stop:
+                update_token = _EMPTY_TOKEN
+                msg.update_token_ids(update_token, model_meta=model_meta)
+                msg.status = MessageStatus.STOPPED
+
+    def _make_infer_outputs(
+        self,
+        batched_outputs: BatchedOutputs,
+        running: SeqList,
+    ):
+        """Make infer output."""
+        new_token_timestamp = batched_outputs.new_token_timestamp
+        next_token_ids = batched_outputs.next_token_ids
+        logits = batched_outputs.logits
+        stopped = batched_outputs.stopped
+        model_metas = batched_outputs.model_metas
+        logprobs = batched_outputs.logprobs
+
+        seq_length = [seq.num_token_ids for seq in running]
+        is_run = [seq.status == MessageStatus.LOCKED for seq in running]
+        stopped = stopped.tolist()
+        self.update_running(running, next_token_ids, stopped, model_metas)
+
+        # generate output
+        outputs: Dict[int, InferOutput] = dict()
+        for idx, msg in enumerate(running):
+            if not is_run[idx]:
+                continue
+            token_ids = msg.all_ids[-msg.num_new_tokens:]
+            finish = msg.status == MessageStatus.STOPPED or msg.status == MessageStatus.TO_BE_MIGRATED
+            if not finish and len(token_ids) == 0:
+                continue
+            session_id = msg.session_id
+            if msg.resp_cache:
+                cache_block_ids = self.scheduler.block_manager.get_block_table(msg).tolist()
+            else:
+                cache_block_ids = None
+
+            # logprobs
+            num_logprobs = msg.sampling_param.num_logprobs
+            cur_logprobs = None
+            if num_logprobs >= 0:
+                cur_logprobs = (logprobs.vals[idx, :num_logprobs + 1], logprobs.indices[idx, :num_logprobs + 1])
+
+            req_metrics = RequestMetrics(new_token_timestamp, msg.engine_events)
+            out = InferOutput(session_id=session_id,
+                              resp=msg.resp,
+                              finish=finish,
+                              token_ids=token_ids,
+                              cache_block_ids=cache_block_ids,
+                              req_metrics=req_metrics,
+                              logprobs=cur_logprobs)
+            outputs[session_id] = out
+
+            if msg.return_logits:
+                outputs[session_id].logits = logits.split(seq_length)[idx]
+        return outputs
+
+    def _make_forward_inputs(self, prefill: bool, enable_empty: bool = False):
+        """Make forward inputs."""
+        prefill_interval = self.scheduler_config.prefill_interval
+
+        def __gather_all_ids(seqs: SeqList, sampling_inputs: SamplingInputs):
+            """Gather history."""
+            if sampling_inputs.repetition_penalty is None and not any(sampling_inputs.logits_processors):
+                return None
+            batch = len(seqs)
+            max_len = max(seq.num_all_ids for seq in seqs)
+            pad_id = self.model_config.bos_token_id
+            pad_id = 0 if pad_id is None else pad_id
+            output = torch.full((batch, max_len), pad_id, dtype=torch.int64)
+            for idx, seq in enumerate(seqs):
+                h_len = seq.num_all_ids
+                if h_len == 0:
+                    continue
+                h_ids = torch.from_numpy(seq.all_ids)
+                output[idx, -h_len:] = h_ids
+            return output
+
+        def __gather_guided_input_ids(seqs: SeqList, sampling_inputs: SamplingInputs):
+            """Gather input ids for guided decode."""
+            if not any(sampling_inputs.response_formats or ()):
+                return None
+            batch = len(seqs)
+            max_len = max(seq.num_new_tokens for seq in seqs)
+            pad_id = self.model_config.bos_token_id
+            pad_id = 0 if pad_id is None else pad_id
+            output = torch.full((batch, max_len), pad_id, dtype=torch.int64)
+            for idx, seq in enumerate(seqs):
+                h_len = seq.num_new_tokens
+                if h_len == 0:
+                    continue
+                h_ids = torch.from_numpy(seq.all_ids[-seq.num_new_tokens:])
+                output[idx, -h_len:] = h_ids
+            return output
+
+        def __get_num_appendable_ids(seqs: SeqList):
+            """Get num appendable ids."""
+            ret = [seq.sampling_param.max_new_tokens - seq.num_new_tokens for seq in seqs]
+            return torch.tensor(ret)
+
+        def __get_num_ignore_eos(seqs: SeqList):
+            """Get num ignore eos."""
+            ret = [seq.sampling_param.min_new_tokens - seq.num_new_tokens for seq in seqs]
+            return torch.tensor(ret)
+
+        def __need_logits(seqs: SeqList):
+            """Need logits."""
+            return any(seq.return_logits for seq in seqs)
+
+        scheduler = self.scheduler
+        logger.debug(f'Make forward inputs with prefill={prefill}, enable_empty={enable_empty}')
+
+        scheduler_output = scheduler.schedule(is_prefill=prefill, prealloc_size=prefill_interval)
+
+        if enable_empty and len(scheduler_output.running) == 0:
+            return None
+
+        # schedule decoding if no valid prefill reqs.
+        if prefill and len(scheduler_output.running) == 0 and self.engine_config.role != EngineRole.Prefill:
+            prefill = False
+            scheduler_output = scheduler.schedule(is_prefill=prefill, prealloc_size=prefill_interval)
+
+        num_loops = 1 if prefill else prefill_interval
+        running = scheduler_output.running
+        swap_in_map = scheduler_output.swap_in_map
+        swap_out_map = scheduler_output.swap_out_map
+
+        if len(running) == 0:
+            return None
+
+        # create inputs
+        inputs = self.create_model_inputs(running, prefill)
+        sampling_inputs = SamplingInputs.from_sampling_params(running)
+        all_ids = __gather_all_ids(running, sampling_inputs)
+        guided_input_ids = __gather_guided_input_ids(running, sampling_inputs)
+        num_appendable_ids = __get_num_appendable_ids(running)
+        num_ignore_eos = __get_num_ignore_eos(running)
+        return_logits = __need_logits(running)
+
+        sync_long_context = inputs.input_ids.numel() > self.cache_config.max_prefill_token_num
+        return dict(
+            running=running,
+            inputs=inputs,
+            swap_in_map=swap_in_map,
+            swap_out_map=swap_out_map,
+            loop_count=num_loops,
+            all_ids=all_ids,
+            guided_input_ids=guided_input_ids,
+            sampling_inputs=sampling_inputs,
+            num_appendable_ids=num_appendable_ids,
+            num_ignore_eos=num_ignore_eos,
+            return_logits=return_logits,
+            is_dummy=False,
+            sync_long_context=sync_long_context,
+        )
+
+    async def _await_forward_event(self, forward_event: asyncio.Event):
+        """Await forward event."""
+        await forward_event.wait()
+
+    @torch.inference_mode()
+    async def _async_loop_preprocess_message(self, forward_event: asyncio.Event, has_runable_event: RunableEventBase):
+        """Preprocess msg."""
+        while True:
+            await self._await_forward_event(forward_event)
+            await self.req_manager.step()
+            has_runable_event.set()
+
+    async def _async_loop_send_responses(self, que: asyncio.Queue, forward_event: asyncio.Event):
+        """Send responses."""
+
+        def __log_resps(outputs: List[InferOutput]):
+            """Log resps."""
+            if logger.level <= logging.DEBUG:
+                session_ids = [out.session_id for out in outputs]
+                logger.debug(f'Response sessions: {session_ids}')
+            elif logger.level <= logging.INFO:
+                logger.debug(f'Response: num_outputs={len(outputs)}.')
+
+        def __send_resp(out: InferOutput):
+            """Send response."""
+            resp_type = (ResponseType.FINISH if out.finish else ResponseType.SUCCESS)
+            cur_logprobs = out.logprobs
+            logprobs = None
+            if cur_logprobs is not None:
+                # logprobs to dict
+                vals = cur_logprobs[0].tolist()
+                indices = cur_logprobs[1].tolist()
+                cur_logprobs = dict(zip(indices, vals))
+                logprobs = [] if out.resp.data is None else out.resp.data.get('logprobs', [])
+                logprobs = logprobs + [cur_logprobs]
+            self._response(out.resp,
+                           resp_type,
+                           data=dict(token_ids=out.token_ids,
+                                     logits=out.logits,
+                                     cache_block_ids=out.cache_block_ids,
+                                     req_metrics=out.req_metrics,
+                                     logprobs=logprobs))
+
+        def __send_resps(step_outputs: List[InferOutput]):
+            """Send response callback."""
+            __log_resps(step_outputs)
+            for out in step_outputs:
+                __send_resp(out)
+
+        while True:
+            num_outs = que.qsize()
+            if num_outs > 0:
+                resps = []
+                for _ in range(num_outs):
+                    resps += que.get_nowait().values()
+            else:
+                resps = (await que.get()).values()
+            await self._await_forward_event(forward_event)
+            __send_resps(resps)
+
+    def p2p_initialize(self, init_request: DistServeInitRequest):
+        return self.engine_conn.p2p_initialize(init_request)
 
     def p2p_connect(self, conn_request: DistServeConnectionRequest):
         return self.engine_conn.p2p_connect(conn_request)
 
     async def p2p_drop_connect(self, drop_conn_request: DistServeDropConnectionRequest):
         return self.engine_conn.p2p_drop_connect(drop_conn_request)
+
+    @torch.inference_mode()
+    async def _async_loop_migration(self, resp_que: asyncio.Queue, has_runable_event: asyncio.Event):
+        """Async loop migration."""
+        while True:
+            migration_running = self.scheduler._schedule_migration()
+            if not migration_running and not self.scheduler.has_migration_waiting():
+                await self.migration_event.wait()
+            elif migration_running:
+                self.migration_event.clear()
+                for msg in migration_running:
+                    migration_execution_requests: List[Tuple[int, List[Tuple[int, int]]]] = []
+                    migration_request = msg.migration_request
+                    prefill_block_ids = migration_request.remote_block_ids
+                    decode_block_ids = list(self.scheduler.block_manager.get_block_table(msg=msg))
+
+                    if not migration_request.is_dummy_prefill:
+                        assert len(prefill_block_ids) == len(decode_block_ids), (
+                            f'#prefill block ids ({len(prefill_block_ids)}) must equal to '
+                            f'#decode block ids ({len(decode_block_ids)})'
+                            f'all id length: {len(msg.num_token_ids)}')
+                        migration_execution_requests.append((
+                            migration_request.remote_engine_id,
+                            list(zip(prefill_block_ids, decode_block_ids)),
+                        ))
+                        migration_inputs = MigrationExecutionBatch(protocol=migration_request.protocol,
+                                                                   requests=migration_execution_requests)
+                        logger.info(f'migrating session: {msg.session_id} begin')
+                        await self.executor.migrate(migration_inputs)
+                        logger.info(f'migrating session: {msg.session_id} done')
+                        await self.engine_conn.zmq_send(remote_engine_id=migration_request.remote_engine_id,
+                                                        remote_session_id=migration_request.remote_session_id)
+
+                # generate output
+                outputs: Dict[int, InferOutput] = dict()
+                self.scheduler.lock_running_migration(migration_running)
+                for _, msg in enumerate(migration_running):
+                    session_id = msg.session_id
+                    msg.resp.type = ResponseType.SUCCESS
+                    token_ids = [msg.migration_request.remote_token_id]
+                    # MUST be a wall-clock time
+                    new_token_timestamp = time.time()
+                    req_metrics = RequestMetrics(new_token_timestamp, msg.engine_events)
+                    out = InferOutput(
+                        session_id=session_id,
+                        resp=msg.resp,
+                        finish=False,
+                        token_ids=np.array(token_ids)
+                    )
+                    outputs[session_id] = out
+                    self.update_running_migration([msg], np.array([token_ids]), [False], [None])
+                resp_que.put_nowait(outputs)
+                self.scheduler.unlock_running_migration(migration_running)
+                has_runable_event.set()
+            else:
+                # release coroutine for decoding
+                await asyncio.sleep(.5)
+
+    @torch.inference_mode()
+    async def _async_loop_main(
+        self,
+        resp_que: asyncio.Queue,
+        forward_event: asyncio.Event,
+        has_runable_event: RunableEventBase,
+        inputs_maker: InputsMakerBase,
+    ):
+        """Main loop of the engine.
+
+        Each engine instance would communicate with the engine by queue.
+        """
+        scheduler = self.scheduler
+        forward_inputs = None
+        next_running = None
+
+        while True:
+            if next_running is None:
+                if not scheduler.has_unfinished():
+                    forward_event.set()
+                    await has_runable_event.wait()
+                    forward_event.clear()
+
+                scheduler.collect_migration_done()
+                forward_inputs, next_running = await inputs_maker.send_next_inputs()
+                if next_running is None:
+                    # TODO (JimyMa): add watermark check event instead of async sleep.
+                    # self.perfill_watermark_event.wait()
+                    logger.warning(f'no next prefill running request, Maybe cache is full, '
+                                   f'free gpu cache blocks: {scheduler.block_manager.get_num_free_gpu_blocks()}, '
+                                   f'total gpu cache blocks: {scheduler.block_manager.num_gpu_blocks}')
+                    forward_event.set()
+                    await asyncio.sleep(0.1)
+                    forward_event.clear()
+                    continue
+
+            forward_event.set()
+            num_loops = forward_inputs['loop_count']
+            running = next_running
+            next_running = None
+            scheduler.lock_running(running)
+            for idx in range(num_loops):
+
+                # pre-forward before get last token
+                if idx == num_loops - 1:
+                    scheduler.collect_migration_done()
+                    forward_inputs, next_running = await inputs_maker.prefetch_next_inputs()
+
+                # send output
+                out = await self.executor.get_output_async()
+                if out is not None:
+                    step_outputs = self._make_infer_outputs(out, running=running)
+                    resp_que.put_nowait(step_outputs)
+
+                # lock forward event
+                # make sure that prefetch forward would not wait for detokenize
+                # WARNING: this might have side effect on the performance
+                if idx == num_loops // 2:
+                    forward_event.clear()
+
+            scheduler.unlock_running(running)
+            has_runable_event.set()
+
+    @staticmethod
+    def _add_loop_tasks_done_callback(tasks: List[asyncio.Task]):
+        """Add loop tasks done callback."""
+
+        def __task_callback(task: asyncio.Task) -> None:
+            """Raise exception on finish."""
+            task_name = task.get_name()
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                logger.debug(f'Task <{task_name}> cancelled.')
+                return
+            except Exception:
+                logger.exception(f'Task <{task_name}> failed')
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+
+        for task in tasks:
+            task.add_done_callback(__task_callback)
 
     def _loop_finally(self):
         """Finally process for dist."""

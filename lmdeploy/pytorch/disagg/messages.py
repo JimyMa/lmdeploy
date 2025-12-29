@@ -16,7 +16,7 @@ class MigrationExecutionBatch(BaseModel):
 
 class AssignmentInstruct(BaseModel):
     """Assignment Batch."""
-    mr_key: str
+    mr_key: int
     target_offset: int
     source_offset: int
     length: int
@@ -33,16 +33,16 @@ class PDConnectionMessage(BaseModel):
     p_url: str
     d_url: str
     protocol: MigrationProtocol = MigrationProtocol.RDMA
-    tcp_config: Optional[DistServeTCPConfig] = None
-    rdma_config: Optional[DistServeRDMAConfig] = None
-    nvlink_config: Optional[DistServeNVLinkConfig] = None
+    tcp_config: Optional[DistServeTCPConfig] = DistServeTCPConfig()
+    rdma_config: Optional[DistServeRDMAConfig] = DistServeRDMAConfig()
+    nvlink_config: Optional[DistServeNVLinkConfig] = DistServeNVLinkConfig()
 
 
 class DistServeRegisterMRMessage(BaseModel):
     protocol: MigrationProtocol
 
     remote_engine_id: str
-    mr_key: str
+    mr_key: int
     addr: int
     offset: int
     length: int
